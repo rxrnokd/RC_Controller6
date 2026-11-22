@@ -1,0 +1,182 @@
+# =====================================================================
+#  RC카 하드웨어/제어 설정 — 모든 하드웨어 설정값은 이 파일 하나에서 관리
+#  컨테이너 내부 경로: /rc_lidar_docker/config/vehicle.yaml
+#
+#  [표기 규칙]
+#   (DS)   첨부 데이터시트/사양표에서 확인한 값
+#   (GPIO) 첨부 GPIO_Pin.txt 배선 기준
+#   (실측) 실제 차량에서 측정/보정해야 하는 값 — measured: false 인 동안 UI에 '미보정' 경고 표시
+#   null   확인되지 않아 임의로 정하지 않은 값 — 설정 전까지 해당 기능은 비활성화됨
+# =====================================================================
+
+pigpio:
+  host: 127.0.0.1          # 호스트(Raspberry Pi OS)에서 실행 중인 pigpiod (docker network_mode: host)
+  port: 8888
+  # 노드가 비정상 종료돼도 pigpiod 내부 스크립트가 모터 PWM을 0으로 만드는 하드웨어 측 워치독
+  watchdog_script: true
+  watchdog_timeout_ms: 300
+
+# ---------------------------------------------------------------------
+# DC 모터 (JGB37-520R30-12, 엔코더 내장) + 모터 드라이버 (Cytron MDD3A)
+# ---------------------------------------------------------------------
+power:
+  # 모터 드라이버(MDD3A) 입력 배터리 전압 [V]. 반드시 실제 배터리 값으로 설정할 것.
+  # null 이면 모터 출력이 비활성화된다(최대 PWM 상한을 계산할 수 없으므로).
+  # 예) 3S LiPo 만충 12.6 V → 12.6,  2S LiPo 만충 8.4 V → 8.4
+  battery_voltage_max: null
+  driver_vin_min: 4.0      # (DS) MDD3A 입력 4–16 VDC
+  driver_vin_max: 16.0     # (DS)
+  motor_rated_voltage: 12.0  # (DS) JGB37-520R30-12 정격 12 V
+  # 하드웨어 PWM 상한 = min(1, motor_rated_voltage / battery_voltage_max)  (자동 계산, 변경 불가)
+
+motors:
+  pwm_frequency_hz: 1000   # pigpio DMA PWM. 1000 Hz → 200 단계 분해능 (MDD3A 최대 20 kHz (DS))
+  pwm_range: 1000          # 내부 duty 스케일 (pigpio가 실제 분해능으로 매핑)
+  encoder_pull: up         # 엔코더 입력 풀업(up/down/off). 엔코더 전원은 반드시 3.3 V (5 V 출력은 GPIO 손상)
+  # 엔코더 분해능 (DS): 자석 극 11 line, AB 2상, 감속비 1:30
+  encoder_ppr: 11          # 모터축 1회전당 A상 펄스 수
+  quadrature_multiplier: 4 # A/B 양쪽 모든 엣지 카운트
+  gear_ratio: 30.0         # → 바퀴축 1회전 = 11 * 4 * 30 = 1320 count  (실측으로 확인 권장)
+  # 엔코더 동작 검증 완료 표시 — README §6-3(바퀴 1회전 ≈ +1.00), §6-4(방향) 확인 후 true 로 변경.
+  # false(또는 이 줄이 없음)인 동안: PI 속도제어 차단(Open-loop 수동만 가능), 속도·/odom 미발행
+  # (→ SLAM 위치 없음), 자동주차 차단. 신호 없는 엔코더(카운트 0 고정)를 '정지'로 오인하지 않기 위함.
+  encoders_verified: false
+  rated_rpm: 280           # (DS) 정격 속도(감속 후). 목표 RPM 절대 상한
+  no_load_rpm: 320         # (DS) 12 V 무부하 속도. PI 피드포워드 계산에 사용
+  left:                    # (GPIO) 엔코더 DC 모터1
+    name: rear_left_wheel
+    pwm_a: 16
+    pwm_b: 20
+    enc_a: 4
+    enc_b: 14
+    invert_output: false   # 정(+) 명령 시 차량이 후진하면 true
+    invert_encoder: false  # 전진 시 카운트가 감소하면 true
+  right:                   # (GPIO) 엔코더 DC 모터2
+    name: rear_right_wheel
+    pwm_a: 21
+    pwm_b: 26
+    enc_a: 15
+    enc_b: 18
+    invert_output: false   # 좌우 모터는 대칭 장착이라 보통 한쪽을 true로 바꿔야 함 (실측)
+    invert_encoder: false
+
+speed_control:
+  loop_hz: 50
+  default_mode: PI         # PI | OPEN_LOOP  (웹 UI에서 정지 상태일 때 전환 가능)
+  max_rpm_default: 100     # 웹 UI 슬라이더 초기값 (0 ~ rated_rpm)
+  max_pwm_default: 0.35    # 웹 UI 슬라이더 초기값 (0 ~ 하드웨어 PWM 상한)
+  kp: 0.004                # [duty / rpm]   (실측 튜닝 필요)
+  ki: 0.02                 # [duty / (rpm*s)] (실측 튜닝 필요)
+  kff: 1.0                 # 피드포워드 이득: duty_ff = kff * target_rpm / no_load_rpm * (motor_rated_voltage / battery_voltage_max)
+  rpm_accel_limit: 300.0   # 목표 RPM 변화율 제한 [rpm/s]
+  pwm_slew_per_s: 2.0      # PWM 변화율 제한 [duty/s] (0→1 까지 0.5 s)
+  velocity_window_s: 0.10  # RPM 계산 윈도
+  rpm_filter_alpha: 0.5    # 1차 저역통과 (1 = 필터 없음)
+  electronic_differential: true  # 조향 시 좌/우 뒷바퀴 목표속도 차등
+  # --- 엔코더 이상 감지 (PI 모드에서 감지 시 정지 + 래치, E-STOP 해제로 리셋) ---
+  stall_pwm_threshold: 0.25 # 이 duty 이상 출력 중
+  stall_time_s: 0.6         # 이 시간 동안 엔코더 카운트 변화가 없으면 → ENCODER_OR_STALL 고장
+  reverse_rpm_threshold: 15 # 출력 방향과 반대로 이 RPM 이상
+  reverse_time_s: 0.4       # 이 시간 지속 → DIRECTION_MISMATCH 고장 (배선/invert 설정 오류 → 폭주 방지)
+
+vehicle:
+  wheel_diameter_m: 0.075  # (사양) 바퀴 지름 75 mm
+  # 휠베이스: 앞·뒤 차축 중심 거리. 섀시 도면에 직접 표기 없음 → 도면 비례로 약 0.17 m 추정. 반드시 실측.
+  wheelbase_m: 0.17
+  wheelbase_measured: false
+  # 트랙: 좌·우 바퀴 중심 거리. 도면 외폭 197 mm - 바퀴폭 30 mm = 0.167 m (실측 권장)
+  track_width_m: 0.167
+  track_width_measured: false
+
+# ---------------------------------------------------------------------
+# 조향 서보 (LD-1501MG): 6–8.4 V (DS), 펄스 500–2500 us ↔ 0–180° (DS), 측정 피드백 없음
+# ---------------------------------------------------------------------
+steering:
+  gpio: 13                 # (GPIO)
+  pulse_abs_min_us: 500    # (DS) 서보 허용 범위 — 소프트웨어가 절대 넘지 않음
+  pulse_abs_max_us: 2500   # (DS)
+  center_us: 1500          # 직진 펄스 (실측 보정)
+  # 링크 기구 한계 내 펄스 범위 (실측 보정). 보정 전에는 좁은 안전 초기값을 사용.
+  pulse_min_us: 1300
+  pulse_max_us: 1700
+  # 바퀴 조향각 1 rad 당 펄스 변화량. 서보 사양 2000 us/π rad (=636.6) 은 링크비 1:1 가정 → 실측 필요
+  us_per_rad: 636.6
+  invert: false            # 왼쪽(+) 명령 시 오른쪽으로 꺾이면 true
+  rate_limit_rad_s: 3.0    # 조향 명령 변화율 제한
+  calibrated: false
+
+# ---------------------------------------------------------------------
+# MT6701 — 트레일러 연결축 각도 전용 (모터 RPM 측정에 사용하지 않음)
+# ---------------------------------------------------------------------
+trailer:
+  enc_a: 19                # (GPIO)
+  enc_b: 10                # (GPIO)  ※ SPI0 MOSI 핀 → SPI 비활성화 필요
+  enc_z: 9                 # (GPIO)  ※ SPI0 MISO 핀
+  pull: off
+  # MT6701 ABZ 출력 분해능(PPR)은 칩에 프로그래밍된 값에 따름. 확인 전 null → 각도 발행 비활성화.
+  # 확인 방법: 웹 UI의 'MT6701 raw count'와 'Z 간격 count'를 보고 PPR = Z간격 / 4
+  ppr: null
+  invert: false
+  zero_file: /rc_lidar_docker/config/trailer_zero.json  # 영점(Z 인덱스 기준 오프셋) 저장
+
+# ---------------------------------------------------------------------
+# 초음파 US-100 x4 (Trig/Echo 모드: 뒷면 점퍼 제거, 전원 3.3 V 권장 → Echo 3.3 V)
+# ---------------------------------------------------------------------
+ultrasonic:
+  period_s: 0.06           # 센서 1개 측정 간격 (순차 측정으로 간섭 방지, 4개 1주기 = 0.24 s)
+  timeout_s: 0.035         # 에코 대기 제한
+  speed_of_sound_m_s: 343.0  # 20°C 가정 (US-100 Trig/Echo 모드는 온도보정 없음)
+  min_range_m: 0.02        # 측정 가능 범위 — US-100 데이터시트로 확인 필요 (첨부 자료에 없음)
+  max_range_m: 4.5
+  field_of_view_rad: 0.26  # 확인 필요 (첨부 자료에 없음)
+  sensors:                 # (GPIO). label/위치는 실제 장착에 맞게 수정
+    - {name: us1, label: "초음파1", trig: 17, echo: 27, x: 0.0, y: 0.0, yaw: 0.0}
+    - {name: us2, label: "초음파2", trig: 22, echo: 23, x: 0.0, y: 0.0, yaw: 0.0}
+    - {name: us3, label: "초음파3", trig: 24, echo: 25, x: 0.0, y: 0.0, yaw: 0.0}
+    - {name: us4, label: "초음파4", trig: 5,  echo: 6,  x: 0.0, y: 0.0, yaw: 0.0}
+  mount_measured: false
+
+# ---------------------------------------------------------------------
+# RPLIDAR C1 (sllidar_ros2 기존 드라이버) + TF
+# ---------------------------------------------------------------------
+lidar:
+  serial_port: /dev/ttyUSB0  # udev 규칙 사용 시 /dev/rplidar
+  frame_id: laser
+  # base_link(뒷차축 중심, 지면 투영) → laser 장착 위치. 반드시 실측.
+  x: 0.0
+  y: 0.0
+  z: 0.10
+  yaw: 0.0                   # 라이다 0° 방향이 차량 전방과 다르면 보정 (rad)
+  measured: false
+
+odometry:
+  yaw_source: steering       # steering: v*tan(δ)/L (명령 조향각 사용) | wheel_diff: (vR-vL)/track (엔코더만 사용)
+  publish_tf: true
+  input_timeout_s: 0.3
+
+slam:
+  config_file: /rc_lidar_docker/config/slam.yaml   # 기존 파일 재사용
+  maps_dir: /rc_lidar_docker/maps
+
+# ---------------------------------------------------------------------
+# 제어권 / 안전
+# ---------------------------------------------------------------------
+safety:
+  command_timeout_s: 0.5     # 제어 클라이언트 명령 끊김 → 정지
+  hw_command_timeout_s: 0.3  # Command Manager → 차량 제어부 명령 끊김 → 정지
+  stop_speed_m_s: 0.02       # 모드 전환 시 '정지' 판정 속도
+  mode_switch_timeout_s: 3.0 # 이 시간 안에 정지하지 않으면 모드 전환 취소
+
+autopark:
+  # 자동주차 알고리즘(노트북)이 준비되기 전까지 false 유지 → AUTO_PARK 모드 진입 불가
+  enabled: false
+  require_map_pose: true     # map→base_link TF(SLAM 위치추정)가 유효해야 진입/유지
+  feedback_timeout_s: 0.5    # 엔코더/odom 피드백 손실 판정
+
+web:
+  port: 8080
+  # 신뢰할 수 있는 로컬 네트워크만 허용 (그 외 IP는 연결 거부)
+  allowed_networks: ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+  state_rate_hz: 10
+  scan_rate_hz: 5
+  map_min_interval_s: 2.0

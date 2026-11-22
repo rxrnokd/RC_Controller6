@@ -1,0 +1,42 @@
+# ---- 요청: 문서/이미지/텍스트 파일 제외 ----
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.txt
+# 단, 파이썬 의존성 목록은 실행에 필요하므로 포함
+!rc_lidar_docker/autopark/requirements.txt
+
+# ---- 로그 ----
+*.log
+log/
+
+# ---- 비밀/로컬 환경 (.env.example 만 올림) ----
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# ---- ROS 2 colcon 빌드 산출물 ----
+rc_lidar_docker/ros2_ws/build/
+rc_lidar_docker/ros2_ws/install/
+rc_lidar_docker/ros2_ws/log/
+
+# ---- 차량별 실행 데이터 (저장 지도, 트레일러 영점, 자동주차 출력) ----
+rc_lidar_docker/maps/
+rc_lidar_docker/config/trailer_zero.json
+*.svg
+
+# ---- 에디터/OS/도구 ----
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+desktop.ini
+.DS_Store

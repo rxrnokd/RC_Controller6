@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RC Car Control</title>
+<style>
+:root{
+  --bg:#0f1216; --panel:#171b21; --panel2:#1e232b; --line:#2a313b; --text:#e6e9ee; --muted:#8b95a3;
+  --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#4c8dff; --map-unknown:#3a3f47;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+  font:13px/1.4 system-ui,-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif}
+button{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);
+  border-radius:6px;padding:6px 10px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+input[type=text]{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);
+  border-radius:6px;padding:6px 8px;min-width:0}
+input[type=range]{width:100%}
+.app{display:grid;grid-template-rows:auto 1fr;height:100vh}
+header{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 12px;
+  background:var(--panel);border-bottom:1px solid var(--line)}
+header h1{font-size:15px;margin:0 8px 0 0;font-weight:600}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;
+  background:var(--panel2);border:1px solid var(--line);font-size:12px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+.spacer{flex:1}
+#estop{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700;padding:9px 18px;font-size:14px}
+#estopReset{display:none}
+main{display:grid;grid-template-columns:1fr 390px;min-height:0}
+#mapWrap{position:relative;min-height:0;background:#0b0d10}
+#map{position:absolute;inset:0;width:100%;height:100%;cursor:grab}
+.overlay{position:absolute;background:rgba(15,18,22,.85);border:1px solid var(--line);
+  border-radius:8px;padding:6px 8px;font-size:12px}
+#mapTools{top:10px;left:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+#poseBox{bottom:10px;left:10px;font-variant-numeric:tabular-nums}
+#banner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:none;
+  background:rgba(248,81,73,.92);color:#fff;padding:16px 22px;border-radius:10px;font-size:16px;
+  font-weight:700;text-align:center;max-width:80%}
+aside{overflow:auto;border-left:1px solid var(--line);background:var(--panel);padding:10px;
+  display:flex;flex-direction:column;gap:10px}
+.card{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px}
+.card h2{font-size:12px;margin:0 0 8px;color:var(--muted);font-weight:600;letter-spacing:.02em;
+  display:flex;justify-content:space-between;align-items:center}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-variant-numeric:tabular-nums}
+.kv span:nth-child(odd){color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:3px 4px;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left;color:var(--muted);font-weight:400}
+th{color:var(--muted);font-weight:500}
+.bar{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative}
+.bar>i{position:absolute;top:0;bottom:0;background:var(--accent)}
+.bar.center>i{left:50%}
+.slider{display:grid;grid-template-columns:96px 1fr 62px;gap:8px;align-items:center;margin:4px 0}
+.slider output{text-align:right;font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)} .warn{color:var(--warn)} .bad{color:var(--bad)} .ok{color:var(--ok)}
+.list{margin:0;padding-left:16px}
+#events{max-height:120px;overflow:auto;font-size:12px}
+kbd{background:var(--bg);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;
+  padding:0 5px;font-size:11px}
+.big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+@media (max-width:900px){
+  main{grid-template-columns:1fr;grid-template-rows:60vh auto}
+  aside{border-left:0;border-top:1px solid var(--line)}
+}
+</style>
+</head>
+<body>
+<div class="app">
+<header>
+  <h1>RC Car</h1>
+  <span class="chip"><span class="dot" id="dWs"></span><span id="tWs">연결 중…</span></span>
+  <span class="chip" id="chipMode">모드 —</span>
+  <span class="chip" id="chipOwner">제어권 —</span>
+  <span class="chip"><span class="dot" id="dLidar"></span>라이다</span>
+  <span class="chip"><span class="dot" id="dEnc"></span>엔코더</span>
+  <span class="chip"><span class="dot" id="dOdom"></span>Odom</span>
+  <span class="chip"><span class="dot" id="dTf"></span>SLAM 위치</span>
+  <span class="chip"><span class="dot" id="dMap"></span>지도</span>
+  <span class="chip" id="chipSlam">SLAM 준비 안 됨</span>
+  <span class="spacer"></span>
+  <button id="estopReset">E-STOP 해제 / 고장 리셋</button>
+  <button id="estop" title="Esc">비상정지</button>
+</header>
+<main>
+  <div id="mapWrap">
+    <canvas id="map"></canvas>
+    <div class="overlay" id="mapTools">
+      <button id="btnFollow" class="on">차량 추적</button>
+      <button id="btnZoomIn">＋</button><button id="btnZoomOut">－</button>
+      <label class="row"><input type="checkbox" id="chkScan" checked>스캔</label>
+      <span class="muted" id="mapInfo">지도 없음</span>
+    </div>
+    <div class="overlay" id="poseBox">위치 —</div>
+    <div id="banner"></div>
+  </div>
+  <aside>
+    <div class="card">
+      <h2>조종 <span id="ownTag" class="muted"></span></h2>
+      <div class="row" style="margin-bottom:6px">
+        <button id="btnClaim">제어권 가져오기</button>
+        <button id="btnRelease">제어권 반납</button>
+        <button id="btnPI">PI 속도제어</button>
+        <button id="btnOL">Open-loop PWM</button>
+      </div>
+      <div class="slider"><span>속도 명령</span><input type="range" id="sSpeed" min="5" max="100" value="40"><output id="oSpeed"></output></div>
+      <div class="slider"><span>최대 RPM</span><input type="range" id="sRpm" min="0" max="280" value="100"><output id="oRpm"></output></div>
+      <div class="slider"><span>최대 PWM</span><input type="range" id="sPwm" min="0" max="100" value="35"><output id="oPwm"></output></div>
+      <div class="slider"><span>최대 조향</span><input type="range" id="sSteer" min="0" max="100" value="100"><output id="oSteer"></output></div>
+      <div class="muted" style="margin-top:6px">
+        <kbd>W</kbd>/<kbd>↑</kbd> 전진 <kbd>S</kbd>/<kbd>↓</kbd> 후진 <kbd>A</kbd>/<kbd>←</kbd> <kbd>D</kbd>/<kbd>→</kbd> 조향
+        <kbd>Space</kbd> 정지 <kbd>Esc</kbd> 비상정지
+      </div>
+      <div class="kv" style="margin-top:6px"><span>현재 명령</span><span id="cmdNow">—</span>
+        <span>하드웨어 상태</span><span id="hwMode">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>DC 모터 (엔코더) <span id="encRate" class="muted"></span></h2>
+      <table>
+        <tr><th></th><th>왼쪽</th><th>오른쪽</th></tr>
+        <tr><td>목표 RPM</td><td id="mL_t">—</td><td id="mR_t">—</td></tr>
+        <tr><td>측정 RPM</td><td id="mL_m">—</td><td id="mR_m">—</td></tr>
+        <tr><td>PWM</td><td id="mL_p">—</td><td id="mR_p">—</td></tr>
+        <tr><td>방향</td><td id="mL_d">—</td><td id="mR_d">—</td></tr>
+        <tr><td>누적 회전</td><td id="mL_r">—</td><td id="mR_r">—</td></tr>
+        <tr><td>이동거리</td><td id="mL_x">—</td><td id="mR_x">—</td></tr>
+      </table>
+      <div class="row" style="gap:6px;margin-top:6px">
+        <div class="bar center" style="flex:1"><i id="bL"></i></div>
+        <div class="bar center" style="flex:1"><i id="bR"></i></div>
+      </div>
+      <div class="kv" style="margin-top:8px">
+        <span>차량 속도</span><span id="vSpeed">—</span>
+        <span>누적 주행거리</span><span id="vOdo">—</span>
+        <span>PWM 하드 상한</span><span id="vHard">—</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>조향 서보</h2>
+      <div class="kv">
+        <span>목표각</span><span id="stT">—</span>
+        <span>명령각</span><span id="stC">—</span>
+        <span>펄스</span><span id="stP">—</span>
+        <span>측정각</span><span class="muted">측정 불가 (서보 위치 피드백 없음)</span>
+        <span>범위</span><span id="stL">—</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>트레일러 각도 (MT6701) <button id="btnZero">영점 설정</button></h2>
+      <div class="row" style="align-items:center;gap:12px">
+        <svg id="gauge" width="120" height="70" viewBox="-60 -60 120 70" aria-label="트레일러 각도">
+          <path d="M -50 0 A 50 50 0 0 1 50 0" fill="none" stroke="var(--line)" stroke-width="8"/>
+          <line x1="0" y1="0" x2="0" y2="-50" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 3"/>
+          <line id="needle" x1="0" y1="0" x2="0" y2="-46" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/>
+          <circle r="4" fill="var(--accent)"/>
+        </svg>
+        <div><div class="big" id="trA">—</div><div class="muted" id="trSrc"></div></div>
+      </div>
+      <div class="kv" style="margin-top:6px">
+        <span>raw count</span><span id="trRaw">—</span>
+        <span>Z 간격 count</span><span id="trZ">—</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>초음파 거리</h2>
+      <div id="usList"></div>
+    </div>
+
+    <div class="card">
+      <h2>모드</h2>
+      <div class="row">
+        <button id="btnManual">MANUAL</button>
+        <button id="btnAuto">AUTO_PARK</button>
+        <span id="modeNote" class="muted"></span>
+      </div>
+      <ul class="list muted" id="apReasons" style="margin-top:6px"></ul>
+    </div>
+
+    <div class="card">
+      <h2>자동주차 (노트북 알고리즘) <span id="pkConn" class="muted"></span></h2>
+      <div class="row" style="margin-bottom:6px">
+        <button id="btnPickGoal" title="트레일러 차축 위치를 누르고, 트레일러가 향할(차량 쪽) 방향으로 드래그">목표 지정</button>
+        <button id="btnPickStart" title="SLAM 위치가 없을 때 경로 검증용 시작자세(견인차 뒷차축)">검증용 시작자세</button>
+        <button id="btnPlan">경로 계획</button>
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <button id="btnParkStart">자동주차 시작</button>
+        <button id="btnParkStop">자동주차 중지</button>
+        <button id="btnParkClear">경로 지우기</button>
+      </div>
+      <div class="kv">
+        <span>단계</span><span id="pkPhase">—</span>
+        <span>메시지</span><span id="pkMsg">—</span>
+        <span>목표</span><span id="pkGoal">—</span>
+        <span>계획</span><span id="pkPlan">—</span>
+        <span>추종</span><span id="pkTrack">—</span>
+        <span>오차</span><span id="pkErr">—</span>
+      </div>
+      <div id="pkBlock" style="margin-top:6px;font-size:12px"></div>
+      <div class="muted" style="margin-top:6px;font-size:12px">
+        지도: <span style="color:#f0883e">주황</span>=Hybrid A* ·
+        <span style="color:#58a6ff">파랑</span>=Planning MPC (실선 전진/점선 후진) ·
+        <span style="color:#a371f7">보라</span>=트레일러 궤적 · <span style="color:#3fb950">녹색</span>=Tracking MPC 예측
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>지도</h2>
+      <div class="row">
+        <input type="text" id="mapName" placeholder="지도 이름 (영문/숫자)" style="flex:1">
+        <button id="btnSaveMap">저장</button>
+      </div>
+      <div class="muted" id="mapMsg" style="margin-top:6px"></div>
+    </div>
+
+    <div class="card">
+      <h2>고장 · 경고 · 미보정</h2>
+      <div id="faults" class="muted">—</div>
+    </div>
+
+    <div class="card">
+      <h2>이벤트</h2>
+      <div id="events" class="muted"></div>
+    </div>
+  </aside>
+</main>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const fmt = (x, d = 1, u = '') => (x === null || x === undefined || !isFinite(x)) ? '—' : (+x).toFixed(d) + u;
+const deg = r => r * 180 / Math.PI;
+
+let ws = null, myId = null, cfg = null, st = null, lastMsgT = 0, rtt = null;
+let map = null, mapImg = null, scanPts = null, scanFrame = null;
+let park = null, pick = null, pickDrag = null, goalSel = null, startSel = null;
+const keys = new Set();
+
+/* ---------------- WebSocket ---------------- */
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => ws.send(JSON.stringify({type: 'hello', role: 'ui', name: navigator.platform || 'browser'}));
+  ws.onmessage = ev => {
+    lastMsgT = performance.now();
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === 'welcome') { myId = m.id; cfg = m.config; buildUltrasonic(); }
+    else if (m.type === 'state') { st = m; render(); }
+    else if (m.type === 'map') decodeMap(m);
+    else if (m.type === 'scan') { scanPts = m.pts; scanFrame = m.frame; }
+    else if (m.type === 'park_paths') park = m;
+    else if (m.type === 'pong') rtt = performance.now() - m.t;
+    else if (m.type === 'reply') onReply(m);
+  };
+  ws.onclose = () => { ws = null; myId = null; setTimeout(connect, 1000); };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+setInterval(() => send({type: 'ping', t: performance.now()}), 500);
+
+function onReply(m) {
+  if (m.req === 'save_map') { $('mapMsg').textContent = (m.ok ? '✔ ' : '✖ ') + (m.msg || ''); return; }
+  if (m.req === 'park_cmd' && !m.ok) { $('pkMsg').textContent = '✖ ' + m.msg; }
+  if (!m.ok && m.msg) addLocalEvent(`✖ ${m.req}: ${m.msg}`);
+}
+const localEvents = [];
+function addLocalEvent(t) { localEvents.push({t: Date.now() / 1000, msg: t}); if (localEvents.length > 8) localEvents.shift(); }
+
+/* ---------------- 조종 ---------------- */
+const isOwner = () => !!(st && st.you && st.you.owner);
+const ctrl = () => (st && st.control) || {};
+const veh = () => (st && st.vehicle) || null;
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.key === 'Escape') { estop(); e.preventDefault(); return; }
+  if (e.key === ' ') { keys.clear(); send({type: 'stop'}); e.preventDefault(); return; }
+  const k = normKey(e.key); if (k) { keys.add(k); e.preventDefault(); }
+});
+document.addEventListener('keyup', e => { const k = normKey(e.key); if (k) keys.delete(k); });
+window.addEventListener('blur', () => keys.clear());
+document.addEventListener('visibilitychange', () => { if (document.hidden) keys.clear(); });
+function normKey(k) {
+  k = k.length === 1 ? k.toLowerCase() : k;
+  return ({w: 'f', ArrowUp: 'f', s: 'b', ArrowDown: 'b', a: 'l', ArrowLeft: 'l', d: 'r', ArrowRight: 'r',
+           'ㅈ': 'f', 'ㄴ': 'b', 'ㅁ': 'l', 'ㅇ': 'r'})[k] || null;
+}
+let lastDriveActive = false;
+setInterval(() => {   // 20 Hz 명령 (제어권 보유 중에는 정지 명령도 계속 전송 = 하트비트)
+  const c = ctrl(), v = veh();
+  if (!st || !v || c.mode !== 'MANUAL' || c.estop) return;
+  const active = keys.size > 0;
+  if (!isOwner() && !(active && !c.owner)) return;
+  const dir = (keys.has('f') ? 1 : 0) - (keys.has('b') ? 1 : 0);
+  const sdir = (keys.has('l') ? 1 : 0) - (keys.has('r') ? 1 : 0);
+  const frac = $('sSpeed').value / 100;
+  const steer = sdir * v.settings.max_steer_rad;
+  const msg = {type: 'drive', steer};
+  if (c.control_mode === 'PI') {
+    const vmax = v.settings.max_rpm * Math.PI * cfg.wheel_diameter_m / 60;
+    msg.v = dir * frac * vmax;
+  } else msg.throttle = dir * frac;
+  send(msg);
+  $('cmdNow').textContent = c.control_mode === 'PI'
+    ? `v ${fmt(msg.v, 2, ' m/s')}, 조향 ${fmt(deg(steer), 1, '°')}`
+    : `throttle ${fmt(msg.throttle * 100, 0, '%')} × 최대PWM, 조향 ${fmt(deg(steer), 1, '°')}`;
+  lastDriveActive = active;
+}, 50);
+
+function estop() { keys.clear(); send({type: 'estop'}); }
+$('estop').onclick = estop;
+$('estopReset').onclick = () => send({type: 'estop_reset'});
+$('btnClaim').onclick = () => send({type: 'claim', force: true});
+$('btnRelease').onclick = () => send({type: 'release'});
+$('btnPI').onclick = () => send({type: 'set_control_mode', control_mode: 'PI'});
+$('btnOL').onclick = () => {
+  if (confirm('Open-loop PWM 모드: 엔코더 피드백 없이 PWM 을 직접 출력합니다. 전환할까요?'))
+    send({type: 'set_control_mode', control_mode: 'OPEN_LOOP'});
+};
+$('btnManual').onclick = () => send({type: 'mode', mode: 'MANUAL'});
+$('btnAuto').onclick = () => send({type: 'mode', mode: 'AUTO_PARK'});
+$('btnZero').onclick = () => { if (confirm('현재 트레일러 위치를 0°로 설정할까요? (트레일러를 일직선으로 정렬한 상태)')) send({type: 'trailer_zero'}); };
+$('btnSaveMap').onclick = () => { $('mapMsg').textContent = '저장 중…'; send({type: 'save_map', name: $('mapName').value.trim()}); };
+
+// 슬라이더: 사용자가 움직일 때만 전송, 그 외에는 서버의 실제 값으로 동기화
+let sliderTouchedAt = 0;
+function limitSlider(id, outId, toMsg, label) {
+  const el = $(id);
+  el.addEventListener('input', () => { sliderTouchedAt = performance.now(); $(outId).textContent = label(el.value); });
+  el.addEventListener('change', () => { send(Object.assign({type: 'set_limits'}, toMsg(+el.value))); sliderTouchedAt = performance.now(); });
+}
+limitSlider('sRpm', 'oRpm', v => ({max_rpm: v}), v => v);
+limitSlider('sPwm', 'oPwm', v => ({max_pwm: v / 100}), v => v + '%');
+limitSlider('sSteer', 'oSteer', v => ({max_steer_rad: v / 100 * ((veh() && veh().steer_hw_limit_rad) || 0)}),
+  v => fmt(deg(v / 100 * ((veh() && veh().steer_hw_limit_rad) || 0)), 1, '°'));
+$('sSpeed').addEventListener('input', () => $('oSpeed').textContent = $('sSpeed').value + '%');
+$('oSpeed').textContent = $('sSpeed').value + '%';
+
+/* ---------------- 렌더링 ---------------- */
+function dot(id, s) { $(id).className = 'dot ' + (s === true ? 'ok' : s === false ? 'bad' : s || ''); }
+
+function buildUltrasonic() {
+  $('usList').innerHTML = cfg.ultrasonic.map(u => `
+    <div class="slider" style="grid-template-columns:70px 1fr 90px">
+      <span>${u.label}</span><div class="bar"><i id="us_${u.name}" style="left:0;width:0"></i></div>
+      <output id="uso_${u.name}">—</output></div>`).join('');
+}
+
+function render() {
+  const now = performance.now();
+  const c = ctrl(), v = veh(), s = st.slam;
+  dot('dWs', true);
+  $('tWs').textContent = `연결됨 ${rtt !== null ? Math.round(rtt) + 'ms' : ''}`;
+  dot('dLidar', s.lidar_ok); dot('dOdom', s.odom_ok); dot('dTf', s.map_tf_ok); dot('dMap', s.map_received);
+  dot('dEnc', v ? v.encoders_ok : false);
+  $('chipSlam').innerHTML = s.ready ? '<span class="ok">● SLAM 동작 중</span>' : '<span class="warn">SLAM 준비 안 됨</span>';
+
+  // 모드/제어권
+  $('chipMode').textContent = `모드 ${c.mode || '—'}${c.pending_mode ? ' → ' + c.pending_mode + ' (정지 대기)' : ''}`
+    + (c.control_mode ? ` · ${c.control_mode === 'PI' ? 'PI' : 'Open-loop'}` : '');
+  $('chipOwner').textContent = c.owner ? (st.you.owner ? '제어권: 이 브라우저' : `제어권: ${c.owner}`) : '제어권: 없음';
+  $('ownTag').textContent = st.you.owner ? '제어 중' : (c.owner ? '보기 전용' : '키 입력 시 제어권 획득');
+  $('btnPI').classList.toggle('on', c.control_mode === 'PI');
+  $('btnOL').classList.toggle('on', c.control_mode === 'OPEN_LOOP');
+  $('btnManual').classList.toggle('on', c.mode === 'MANUAL');
+  $('btnAuto').classList.toggle('on', c.mode === 'AUTO_PARK');
+  const ap = c.autopark || {};
+  $('btnAuto').disabled = c.mode !== 'AUTO_PARK' && !ap.allowed;
+  $('modeNote').textContent = ap.enabled ? (ap.client ? `자동주차 클라이언트 ${ap.client}${ap.ready ? ' (ready)' : ''}` : '') : '자동주차 비활성(설정)';
+  $('apReasons').innerHTML = (ap.block_reasons || []).map(r => `<li>${r}</li>`).join('');
+  $('estopReset').style.display = c.estop || (v && v.faults && v.faults.some(f => f.startsWith('ENCODER') || f.startsWith('DIRECTION'))) ? 'inline-block' : 'none';
+
+  // 배너
+  let banner = '';
+  if (c.estop) banner = '비상정지 활성 — 해제 버튼으로 복구';
+  else if (!v) banner = '차량 제어 노드 상태 없음';
+  else if (!v.pigpio_connected) banner = 'pigpiod 연결 안 됨 — 모터/센서 정지';
+  $('banner').style.display = banner ? 'block' : 'none';
+  $('banner').textContent = banner;
+
+  if (!v) return;
+  const set = v.settings;
+  $('hwMode').textContent = `${v.active_mode}${v.stop_reason ? ' (' + v.stop_reason + ')' : ''}`;
+  $('encRate').textContent = `엣지 ${v.edge_rate_hz}/s · ${v.counts_per_rev} cnt/rev`;
+  // 슬라이더 동기화
+  if (now - sliderTouchedAt > 1500) {
+    $('sRpm').max = v.rated_rpm; $('sRpm').value = set.max_rpm; $('oRpm').textContent = Math.round(set.max_rpm);
+    $('sPwm').max = Math.round(v.hard_max_pwm * 100); $('sPwm').value = Math.round(set.max_pwm * 100);
+    $('oPwm').textContent = Math.round(set.max_pwm * 100) + '%';
+    const lim = v.steer_hw_limit_rad || 0;
+    $('sSteer').value = lim > 0 ? Math.round(set.max_steer_rad / lim * 100) : 0;
+    $('oSteer').textContent = fmt(deg(set.max_steer_rad), 1, '°');
+  }
+  const [L, R] = v.motors;
+  for (const [p, m] of [['mL', L], ['mR', R]]) {
+    $(p + '_t').textContent = fmt(m.target_rpm, 1);
+    $(p + '_m').textContent = fmt(m.measured_rpm, 1);
+    $(p + '_p').textContent = fmt(m.pwm * 100, 1, '%');
+    $(p + '_d').textContent = m.direction;
+    $(p + '_r').textContent = fmt(m.revolutions, 2);
+    $(p + '_x').textContent = fmt(m.distance_m, 3, ' m');
+  }
+  for (const [id, m] of [['bL', L], ['bR', R]]) {
+    const w = Math.min(50, Math.abs(m.pwm) * 50);
+    const el = $(id); el.style.width = w + '%'; el.style.left = m.pwm >= 0 ? '50%' : (50 - w) + '%';
+  }
+  $('vSpeed').textContent = fmt(v.speed_m_s, 3, ' m/s');
+  $('vOdo').textContent = fmt(v.odometer_m, 2, ' m') + ` (순 ${fmt(v.net_distance_m, 2, ' m')})`;
+  $('vHard').textContent = v.motors_enabled ? fmt(v.hard_max_pwm * 100, 0, '%') : `<비활성> ${v.motors_disabled_reason || ''}`;
+  const sg = v.steering;
+  $('stT').textContent = fmt(deg(sg.target_rad), 1, '°');
+  $('stC').textContent = fmt(deg(sg.cmd_rad), 1, '°') + ' (명령값)';
+  $('stP').textContent = sg.pulse_us ? sg.pulse_us + ' µs' : '—';
+  $('stL').textContent = `좌 ${fmt(deg(sg.limit_left_rad), 1, '°')} / 우 ${fmt(deg(sg.limit_right_rad), 1, '°')}${sg.calibrated ? '' : ' (미보정)'}`;
+  const tr = v.trailer;
+  if (tr.enabled && tr.angle_deg !== null) {
+    $('trA').textContent = fmt(tr.angle_deg, 1, '°');
+    const a = Math.max(-90, Math.min(90, tr.angle_deg));
+    $('needle').setAttribute('transform', `rotate(${-a})`);
+    $('trSrc').textContent = {boot: '영점: 부팅 위치 (정렬 확인 필요)', user: '영점: 사용자 설정', z_index: '영점: Z 인덱스 복원'}[tr.zero_source] || '';
+  } else { $('trA').textContent = '—'; $('trSrc').textContent = 'trailer.ppr 미설정 → 각도 비활성'; }
+  $('trRaw').textContent = tr.raw_count;
+  $('trZ').textContent = tr.z_period_counts ?? (tr.z_seen ? 'Z 1회 감지' : 'Z 미감지');
+  for (const u of v.ultrasonic) {
+    const bar = $('us_' + u.name), out = $('uso_' + u.name); if (!bar) continue;
+    const ok = u.range_m !== null;
+    bar.style.width = ok ? Math.min(100, u.range_m / cfg.ultrasonic_max_m * 100) + '%' : '0';
+    bar.style.background = ok && u.range_m < 0.2 ? 'var(--bad)' : 'var(--accent)';
+    out.innerHTML = ok ? fmt(u.range_m * 100, 1, ' cm') : `<span class="warn">${u.status}</span>`;
+  }
+  const items = [];
+  for (const f of v.faults) items.push(`<div class="bad">● ${f}</div>`);
+  for (const w of v.warnings) items.push(`<div class="warn">▲ ${w}</div>`);
+  if (v.motors_disabled_reason) items.push(`<div class="bad">${v.motors_disabled_reason}</div>`);
+  if (v.calibration_pending.length) items.push(`<div class="warn">미보정: ${v.calibration_pending.join(', ')}</div>`);
+  $('faults').innerHTML = items.join('') || '<span class="ok">없음</span>';
+  const ev = [...(c.events || []), ...localEvents].sort((a, b) => b.t - a.t).slice(0, 14);
+  $('events').innerHTML = ev.map(e => `<div>${new Date(e.t * 1000).toLocaleTimeString()} ${e.msg}</div>`).join('');
+  renderPark();
+  const p = st.pose;
+  $('poseBox').textContent = p ? `[${p.frame}] x ${fmt(p.x, 2)} m  y ${fmt(p.y, 2)} m  yaw ${fmt(deg(p.yaw), 1)}°  v ${fmt(st.odom && st.odom.v, 2)} m/s` : '위치 없음 (odom/TF 미수신)';
+}
+
+function updatePickButtons() {
+  $('btnPickGoal').classList.toggle('on', pick === 'goal');
+  $('btnPickStart').classList.toggle('on', pick === 'start');
+  cv.style.cursor = pick ? 'crosshair' : 'grab';
+  $('pkGoal').textContent = goalSel ? `x ${fmt(goalSel.x, 2)} y ${fmt(goalSel.y, 2)} ${fmt(deg(goalSel.yaw), 0)}°` +
+    (startSel ? ` / 검증시작 x ${fmt(startSel.x, 2)} y ${fmt(startSel.y, 2)}` : '') : '지도에서 지정';
+}
+$('btnPickGoal').onclick = () => { pick = pick === 'goal' ? null : 'goal'; updatePickButtons(); };
+$('btnPickStart').onclick = () => {
+  if (startSel && pick !== 'start') { startSel = null; pick = null; } else pick = pick === 'start' ? null : 'start';
+  updatePickButtons();
+};
+$('btnPlan').onclick = () => {
+  if (!goalSel) { $('pkMsg').textContent = '먼저 목표를 지정하세요'; return; }
+  send({type: 'park_cmd', action: 'plan', goal: goalSel, start: startSel});
+};
+$('btnParkStart').onclick = () => {
+  if (confirm('자동주차를 시작합니다. 주변에 사람/장애물이 없고 비상정지를 누를 준비가 되었나요?'))
+    send({type: 'park_cmd', action: 'start'});
+};
+$('btnParkStop').onclick = () => {   // 노트북이 끊겨 있어도 차량은 멈추도록 직접 정지 + MANUAL 요청
+  send({type: 'park_cmd', action: 'stop'}); send({type: 'stop'});
+  if (ctrl().mode === 'AUTO_PARK') send({type: 'mode', mode: 'MANUAL'});
+};
+$('btnParkClear').onclick = () => { goalSel = startSel = null; park = null; updatePickButtons(); send({type: 'park_cmd', action: 'clear'}); };
+updatePickButtons();
+
+function renderPark() {
+  const pk = st.park || {}, ps = pk.status;
+  $('pkConn').textContent = pk.connected ? '노트북 연결됨' : '노트북 미연결';
+  $('pkConn').className = pk.connected ? 'ok' : 'warn';
+  if (!ps) { $('pkPhase').textContent = '—'; $('btnParkStart').disabled = true; return; }
+  $('pkPhase').textContent = ps.phase;
+  $('pkMsg').textContent = ps.message || '';
+  const pl = ps.plan;
+  $('pkPlan').textContent = pl ? `${fmt(pl.length_m, 2)} m · ${pl.segments}구간 [${pl.directions.map(d => d > 0 ? '전' : '후').join('→')}] · MPC ${pl.mpc_ok ? 'OK' : '실패→A*'} · ${pl.time_s}s`
+    + (pl.validation_only ? ' · 검증용' : '') + (pl.notes && pl.notes.length ? ' · ' + pl.notes.join(' / ') : '') : '—';
+  const tk = ps.tracking;
+  $('pkTrack').textContent = tk ? `${tk.status}${tk.reason ? ' (' + tk.reason + ')' : ''} · v ${fmt(tk.v_cmd, 3)} m/s · 조향 ${fmt(deg(tk.steer_cmd), 1)}° · 구간 ${(tk.info.segment ?? 0) + 1}/${tk.info.segments ?? '—'} · ${fmt((tk.info.progress || 0) * 100, 0)}%` : '—';
+  const e = tk && tk.errors;
+  $('pkErr').textContent = e && e.lateral_m !== undefined ? `횡 ${fmt(e.lateral_m * 100, 1)} cm · 방향 ${fmt(deg(e.heading_rad), 1)}° · 연결각 ${fmt(deg(e.hitch_rad), 1)}° · 트레일러 횡 ${fmt(e.trailer_lateral_m * 100, 1)} cm` : '—';
+  const blk = [];
+  if (ps.config_missing && ps.config_missing.length) blk.push(`<div class="bad">설정 누락(autopark/config.yaml): ${ps.config_missing.join(', ')}</div>`);
+  if (!ps.motion_ok) blk.push(`<div class="warn">실제 구동 차단 — ${ps.block_reasons.join(' · ')}</div>`);
+  else blk.push('<div class="ok">구동 피드백 조건 충족</div>');
+  $('pkBlock').innerHTML = blk.join('');
+  $('btnParkStart').disabled = !(ps.phase === 'PLANNED' && ps.motion_ok && pl && !pl.validation_only);
+}
+
+// 통신 상태 감시
+setInterval(() => {
+  if (!ws || performance.now() - lastMsgT > 1500) {
+    dot('dWs', false); $('tWs').textContent = '통신 끊김 — 차량 자동 정지';
+    $('banner').style.display = 'block'; $('banner').textContent = '통신 끊김 — 차량은 명령 타임아웃으로 자동 정지됩니다. 재연결 중…';
+  }
+}, 300);
+
+/* ---------------- 지도 ---------------- */
+async function decodeMap(m) {
+  const bin = Uint8Array.from(atob(m.data), ch => ch.charCodeAt(0));
+  const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream('deflate'));
+  const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+  const cv = document.createElement('canvas'); cv.width = m.width; cv.height = m.height;
+  const g = cv.getContext('2d'), img = g.createImageData(m.width, m.height);
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i] > 127 ? raw[i] - 256 : raw[i];
+    const c = v < 0 ? 58 : 235 - Math.round(v * 2.2);
+    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = Math.max(0, c);
+    img.data[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  map = m; mapImg = cv;
+  $('mapInfo').textContent = `지도 ${m.width}×${m.height} @ ${m.resolution} m`;
+}
+
+const cv = $('map'), g = cv.getContext('2d');
+const view = {x: 0, y: 0, scale: 60, follow: true};
+function resize() { const r = cv.getBoundingClientRect(); cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio; }
+window.addEventListener('resize', resize); resize();
+$('btnFollow').onclick = () => { view.follow = !view.follow; $('btnFollow').classList.toggle('on', view.follow); };
+$('btnZoomIn').onclick = () => view.scale *= 1.25;
+$('btnZoomOut').onclick = () => view.scale /= 1.25;
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio;
+  const mx = (e.clientX - r.left) * dpr, my = (e.clientY - r.top) * dpr;
+  const s0 = view.scale * dpr, wx = view.x + (mx - cv.width / 2) / s0, wy = view.y - (my - cv.height / 2) / s0;
+  view.scale = Math.min(800, Math.max(5, view.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  const s1 = view.scale * dpr; view.x = wx - (mx - cv.width / 2) / s1; view.y = wy + (my - cv.height / 2) / s1;
+}, {passive: false});
+let drag = null;
+function worldAt(e) {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio, s = view.scale * dpr;
+  return {x: view.x + ((e.clientX - r.left) * dpr - cv.width / 2) / s, y: view.y - ((e.clientY - r.top) * dpr - cv.height / 2) / s};
+}
+cv.addEventListener('mousedown', e => {
+  if (pick) { const w = worldAt(e); pickDrag = {p0: w, p: w}; return; }
+  drag = {x: e.clientX, y: e.clientY}; cv.style.cursor = 'grabbing';
+});
+window.addEventListener('mouseup', () => {
+  if (pickDrag) {
+    const {p0, p} = pickDrag, d = Math.hypot(p.x - p0.x, p.y - p0.y);
+    const pose = {x: +p0.x.toFixed(3), y: +p0.y.toFixed(3), yaw: d > 0.03 ? +Math.atan2(p.y - p0.y, p.x - p0.x).toFixed(4) : 0};
+    if (pick === 'goal') goalSel = pose; else startSel = pose;
+    pick = null; pickDrag = null; updatePickButtons();
+  }
+  drag = null; cv.style.cursor = pick ? 'crosshair' : 'grab';
+});
+window.addEventListener('mousemove', e => {
+  if (pickDrag) { pickDrag.p = worldAt(e); return; }
+  if (!drag) return;
+  view.x -= (e.clientX - drag.x) / view.scale; view.y += (e.clientY - drag.y) / view.scale;
+  drag = {x: e.clientX, y: e.clientY};
+  if (view.follow) { view.follow = false; $('btnFollow').classList.remove('on'); }
+});
+
+function draw() {
+  requestAnimationFrame(draw);
+  const W = cv.width, H = cv.height, dpr = devicePixelRatio, s = view.scale * dpr;
+  const p = st && st.pose;
+  if (view.follow && p) { view.x = p.x; view.y = p.y; }
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.fillStyle = '#0b0d10'; g.fillRect(0, 0, W, H);
+  g.setTransform(s, 0, 0, -s, W / 2 - view.x * s, H / 2 + view.y * s);   // 월드(m) 좌표, +y 위쪽
+  // 지도는 차량 위치가 map 프레임일 때만 표시 (odom 좌표와 섞지 않음)
+  if (mapImg && (!p || p.frame === 'map')) {
+    g.imageSmoothingEnabled = false;
+    g.drawImage(mapImg, map.origin.x, map.origin.y, map.width * map.resolution, map.height * map.resolution);
+  }
+  // 1 m 격자
+  g.strokeStyle = 'rgba(255,255,255,0.06)'; g.lineWidth = 1 / s;
+  const x0 = Math.floor(view.x - W / 2 / s), x1 = Math.ceil(view.x + W / 2 / s);
+  const y0 = Math.floor(view.y - H / 2 / s), y1 = Math.ceil(view.y + H / 2 / s);
+  g.beginPath();
+  for (let x = x0; x <= x1; x++) { g.moveTo(x, y0); g.lineTo(x, y1); }
+  for (let y = y0; y <= y1; y++) { g.moveTo(x0, y); g.lineTo(x1, y); }
+  g.stroke();
+  if ($('chkScan').checked && scanPts && p && scanFrame === p.frame) {
+    g.fillStyle = '#ff6b6b'; const r = 2.2 / s;
+    for (let i = 0; i < scanPts.length; i += 2) g.fillRect(scanPts[i] - r / 2, scanPts[i + 1] - r / 2, r, r);
+  }
+  drawPark(s, p);
+  if (p) drawCar(p, s);
+}
+function poly(flat, color, width, s, dash) {
+  if (!flat || flat.length < 4) return;
+  g.strokeStyle = color; g.lineWidth = width / s; g.setLineDash(dash ? [dash / s, dash / s] : []);
+  g.beginPath(); g.moveTo(flat[0], flat[1]);
+  for (let i = 2; i < flat.length; i += 2) g.lineTo(flat[i], flat[i + 1]);
+  g.stroke(); g.setLineDash([]);
+}
+function outline(rects, color, s) {
+  if (!rects) return;
+  g.strokeStyle = color; g.lineWidth = 2 / s;
+  for (const r of rects) { g.beginPath(); r.forEach((q, i) => i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1])); g.closePath(); g.stroke(); }
+}
+function arrow(pose, color, s, label) {
+  g.strokeStyle = g.fillStyle = color; g.lineWidth = 2 / s;
+  const L = 0.25, ex = pose.x + L * Math.cos(pose.yaw), ey = pose.y + L * Math.sin(pose.yaw);
+  g.beginPath(); g.arc(pose.x, pose.y, 0.03, 0, 7); g.fill();
+  g.beginPath(); g.moveTo(pose.x, pose.y); g.lineTo(ex, ey); g.stroke();
+  g.save(); g.translate(pose.x, pose.y); g.scale(1, -1);
+  g.font = (12 / s) + 'px sans-serif'; g.fillText(label, 0.04, -0.04); g.restore();
+}
+function drawPark(s, p) {
+  if (park && (!p || p.frame === 'map')) {
+    outline(park.start_outline, 'rgba(63,185,80,0.8)', s);
+    outline(park.goal_outline, 'rgba(248,81,73,0.9)', s);
+    poly(park.astar, '#f0883e', 1.5, s);
+    if (park.mpc && park.segments) {
+      for (const sg of park.segments)
+        poly(park.mpc.slice(sg.i0 * 2, sg.i1 * 2 + 2), '#58a6ff', 3, s, sg.dir < 0 ? 6 : 0);
+      poly(park.mpc_trailer, '#a371f7', 1.5, s, 3);
+    }
+  }
+  const ps = st && st.park && st.park.status, tk = ps && ps.tracking;
+  if (tk && tk.predicted) { const f = []; tk.predicted.forEach(q => f.push(q[0], q[1])); poly(f, '#3fb950', 2.5, s); }
+  if (tk && tk.info && tk.info.ref) { g.fillStyle = '#3fb950'; g.beginPath(); g.arc(tk.info.ref[0], tk.info.ref[1], 0.025, 0, 7); g.fill(); }
+  if (goalSel) arrow(goalSel, '#f85149', s, '목표(트레일러)');
+  if (startSel) arrow(startSel, '#3fb950', s, '검증용 시작');
+  if (pickDrag) arrow({x: pickDrag.p0.x, y: pickDrag.p0.y, yaw: Math.atan2(pickDrag.p.y - pickDrag.p0.y, pickDrag.p.x - pickDrag.p0.x)}, '#ffd33d', s, '');
+}
+function drawCar(p, s) {
+  const v = veh();
+  g.save(); g.translate(p.x, p.y); g.rotate(p.yaw);
+  // base_link = 뒷차축 중심. 섀시 270×118 mm, 바퀴 외폭 197 mm (도면)
+  const Lb = (cfg && cfg.wheelbase_m) || 0.17, rear = 0.05;
+  g.fillStyle = 'rgba(76,141,255,0.35)'; g.strokeStyle = '#4c8dff'; g.lineWidth = 2 / s;
+  g.beginPath(); g.rect(-rear, -0.059, 0.27, 0.118); g.fill(); g.stroke();
+  g.fillStyle = '#c9d1d9';
+  for (const y of [-0.0835, 0.0835]) g.fillRect(-0.0375, y - 0.015, 0.075, 0.03);
+  // 앞바퀴 (명령 조향각)
+  const sa = v ? v.steering.cmd_rad : 0;
+  for (const y of [-0.0835, 0.0835]) { g.save(); g.translate(Lb, y); g.rotate(sa); g.fillRect(-0.0375, -0.015, 0.075, 0.03); g.restore(); }
+  g.strokeStyle = '#ffd33d'; g.beginPath(); g.moveTo(0, 0); g.lineTo(0.32, 0); g.stroke();
+  // 트레일러 (상대각 표시용 막대, 길이는 표시용)
+  const geo = park && park.geometry;
+  if (geo && v && v.trailer.enabled && v.trailer.angle_rad !== null) {   // 실측 치수(autopark config)로 트레일러 표시
+    const b = v.trailer.angle_rad;
+    g.strokeStyle = '#a371f7'; g.fillStyle = 'rgba(163,113,247,0.25)'; g.lineWidth = 2 / s;
+    g.beginPath(); g.moveTo(-geo.hitch_offset, 0);
+    const ax = -geo.hitch_offset - geo.trailer_length * Math.cos(b), ay = -geo.trailer_length * Math.sin(b);
+    g.lineTo(ax, ay); g.stroke();
+    g.translate(ax, ay); g.rotate(b);
+    g.beginPath(); g.rect(-geo.trailer_rear, -geo.trailer_width / 2, geo.trailer_front + geo.trailer_rear, geo.trailer_width);
+    g.fill(); g.stroke();
+  } else if (v && v.trailer.enabled && v.trailer.angle_rad !== null) {
+    g.translate(-rear, 0); g.rotate(Math.PI + v.trailer.angle_rad);
+    g.strokeStyle = '#a371f7'; g.lineWidth = 4 / s;
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(0.3, 0); g.stroke();
+  }
+  g.restore();
+}
+requestAnimationFrame(draw);
+connect();
+</script>
+</body>
+</html>

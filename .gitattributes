@@ -1,0 +1,2 @@
+# 라즈베리파이(Linux)에서 그대로 실행되도록 줄바꿈을 LF 로 고정
+* text=auto eol=lf

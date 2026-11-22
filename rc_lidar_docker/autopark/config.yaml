@@ -1,0 +1,108 @@
+# =====================================================================
+#  트레일러 후진 자동주차 설정 (노트북에서 실행)
+#  null = 확인되지 않은 값 → 설정 전에는 경로 계획이 거부되고 누락 항목이 표시됨
+#  (실측) 표시 항목은 rc_lidar_docker/config/vehicle.yaml 및 실제 차량과 일치시킬 것
+# =====================================================================
+
+vehicle:                       # 견인차(RC카). 원점 = 뒷차축 중심 (Pi 의 base_link 와 동일)
+  wheelbase_m: 0.17            # (실측) 도면 비례 추정값. vehicle.yaml 과 같은 값
+  steer_max_rad: null          # (실측) 조향 보정 후 실제 바퀴 최대 조향각. Pi 가 보고하는 조향 한계보다 크면 작은 값 사용
+  length_m: 0.27               # 섀시 도면 전장
+  width_m: 0.197               # 섀시 도면 외폭(바퀴 포함)
+  rear_overhang_m: 0.05        # (실측) 뒷차축 → 차량 뒤끝 거리 (추정값)
+
+trailer:                       # 트레일러 — 전부 실측 필요
+  hitch_offset_m: null         # 뒷차축 → 히치 핀 거리 (뒤쪽이 +)
+  length_m: null               # 히치 핀 → 트레일러 차축 거리 (L2)
+  front_m: null                # 트레일러 차축 → 트레일러 앞끝 (히치 방향, +)
+  rear_m: null                 # 트레일러 차축 → 트레일러 뒤끝
+  width_m: null
+  hitch_angle_max_rad: null    # 운용 연결각 한계 (기구적 한계보다 작게). 넘으면 Jackknife 위험 → 계획 거부/정지
+
+map:
+  unknown_is_obstacle: true    # SLAM 미탐색 영역은 장애물로 취급
+  occupied_threshold: 65       # OccupancyGrid 값(0~100) 이상이면 장애물
+  safety_margin_m: 0.05        # 차체·트레일러와 장애물 최소 거리
+
+hybrid_astar:
+  xy_resolution_m: 0.08
+  yaw_bins: 72                 # 5°
+  hitch_resolution_rad: 0.087  # 5°
+  step_m: 0.12                 # 확장 1회 이동거리
+  substep_m: 0.03              # 적분/충돌검사 간격
+  steer_samples: 5             # -max..+max 균등 분할
+  reverse_cost: 1.0            # 후진 비용 배수 (트레일러 후진 주차가 목적이므로 1.0)
+  forward_cost: 1.2
+  switch_cost: 1.0             # 전/후진 전환 비용 [m 환산]
+  steer_cost: 0.2
+  steer_change_cost: 0.3
+  hitch_cost: 0.5              # |연결각| 비용
+  heading_weight: 1.0          # 휴리스틱: 트레일러 방향 오차 가중
+  heuristic_weight: 3.0        # 가중 A* (>1: 빠르지만 최적성 낮음 — 결과는 Planning MPC 가 다듬음)
+  final_direction: reverse     # reverse: 마지막 구간은 반드시 후진 (트레일러 후진 주차) | any
+  goal_tol_xy_m: 0.10          # 트레일러 차축 위치 허용오차 (Planning MPC 가 추가로 줄임)
+  goal_tol_yaw_rad: 0.12
+  goal_tol_hitch_rad: 0.15
+  search_margin_m: 2.0         # 시작/목표를 감싸는 탐색 영역 여유
+  max_expansions: 60000
+  time_limit_s: 30.0
+
+planning_mpc:
+  ds_m: 0.05                   # 최적화 이산화 간격
+  max_vars_per_segment: 20     # 구간당 조향 변수 수 상한 (계산 시간 제한)
+  w_ref: 1.0                   # Hybrid A* 경로 근접 유지
+  w_terminal: 200.0            # 구간 끝/목표 자세 오차
+  w_steer: 0.05
+  w_steer_rate: 2.0
+  w_obstacle: 500.0
+  w_hitch: 200.0
+  obstacle_soft_m: 0.10        # 이 거리보다 가까우면 비용 증가
+  hitch_soft_ratio: 0.7        # hitch_angle_max 의 이 비율부터 비용 증가
+  angle_scale_m: 0.15          # 각도 오차 [rad] → 거리 환산
+  max_iter: 80
+  length_scale_min: 0.7          # 구간 길이 조정 범위 (Hybrid A* 구간 길이 배율)
+  length_scale_max: 1.3
+  join_tol_xy_m: 0.03           # 구간 연결부(시작점·전환점) 허용 불일치
+  join_tol_yaw_rad: 0.05
+  join_tol_hitch_rad: 0.08
+  final_tol_xy_m: 0.05
+  final_tol_yaw_rad: 0.06
+  final_tol_hitch_rad: 0.08
+
+speed:                         # 운용 정책값 (데이터시트 값 아님). 하드웨어 검증 후 조정
+  v_max_forward_m_s: 0.15
+  v_max_reverse_m_s: 0.08
+  a_max_m_s2: 0.15
+  steer_rate_max_rad_s: 1.5    # Pi vehicle.yaml steering.rate_limit_rad_s 이하로
+  v_min_m_s: 0.03              # 주행 중 최소 명령 속도 (정지 마찰 극복)
+  cusp_dwell_s: 0.5
+
+tracking_mpc:
+  dt_s: 0.1
+  horizon: 12
+  q_xy: 10.0
+  q_yaw: 2.0
+  q_hitch: 8.0
+  r_steer: 0.5
+  r_steer_rate: 2.0
+  lookahead_s: 0.3             # 속도 명령 기준 선행 시간
+  search_window: 40            # 기준점 탐색 범위 (점 개수)
+  max_lateral_error_m: 0.10    # 초과 → 재계획
+  max_heading_error_rad: 0.35
+  max_hitch_error_rad: 0.30
+  max_replans: 3               # 초과 → 안전정지
+  segment_end_tol_m: 0.03
+  stop_speed_m_s: 0.02
+  arrive_tol_xy_m: 0.06
+  arrive_tol_yaw_rad: 0.10
+  arrive_tol_hitch_rad: 0.10
+  ultrasonic_stop_m: 0.08      # 유효 초음파 값이 이보다 가까우면 정지 (장착 방향 미보정 시 전 센서 적용)
+
+feedback:                      # 실제 구동(AUTO_PARK) 허용 조건 — 가상값으로 대체하지 않음
+  max_state_age_s: 0.5         # 마지막 state 메시지 수신 후
+  max_pose_age_s: 0.5          # map→base_link (SLAM) 위치 나이
+  max_status_age_s: 0.5        # 차량 상태(트레일러각·엔코더) 나이
+  require_encoder_speed: true  # 엔코더 속도 피드백 필수 (현재 엔코더 고장 → 구동 차단됨)
+  require_steering_calibrated: true
+  start_tol_xy_m: 0.10         # 계획 시작 자세와 현재 자세 차이 허용 (넘으면 재계획 요구)
+  start_tol_yaw_rad: 0.15

@@ -1,0 +1,24 @@
+# 기존 Dockerfile/이미지를 그대로 사용 (ROS 2 Jazzy + SLAM Toolbox 재설치 없음)
+#  - RC_IMAGE: 이미 빌드해 둔 이미지 이름 (docker images 로 확인 후 .env 에 지정하면 재빌드하지 않음)
+#  - 하드웨어(GPIO/PWM)는 호스트 pigpiod(127.0.0.1:8888)를 통해 접근 → privileged 불필요
+services:
+  rc:
+    image: ${RC_IMAGE:-rc_lidar_docker:latest}
+    build: .
+    container_name: rc_car
+    network_mode: host          # ROS 2 DDS, 웹 포트 8080, pigpiod localhost 접근
+    ipc: host
+    restart: unless-stopped     # 전원 재공급 후 자동 시작
+    stop_grace_period: 10s      # 종료 시 노드가 모터 PWM 을 0 으로 만들 시간
+    volumes:
+      - ./:/rc_lidar_docker     # 소스/설정/지도 (호스트와 공유)
+      - /dev:/dev               # 라이다 USB 핫플러그 (장치가 없어도 컨테이너는 시작됨)
+    device_cgroup_rules:
+      - 'c 188:* rmw'           # ttyUSB* (CP2102, RPLIDAR C1)
+      - 'c 166:* rmw'           # ttyACM*
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RC_VEHICLE_CONFIG=/rc_lidar_docker/config/vehicle.yaml
+      - RC_LAUNCH_ARGS=${RC_LAUNCH_ARGS:-}
+      - RC_REBUILD=${RC_REBUILD:-0}
+    entrypoint: ["/bin/bash", "/rc_lidar_docker/scripts/run_in_container.sh"]
