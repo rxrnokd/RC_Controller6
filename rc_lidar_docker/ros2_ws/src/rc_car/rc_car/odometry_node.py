@@ -1,12 +1,14 @@
-"""엔코더(DC 모터 내장) + 서보 명령 조향각 기반 차량 운동학 Odometry.
+"""라이다 스캔매칭 Odometry — DC 모터 엔코더 없이 라이다만으로 odom → base_link 를 추정.
 
-  입력  /joint_states (뒷바퀴 위치 rad), /steering/angle_cmd (rad), /rc/vehicle_status (encoders_ok)
-  출력  /odom (nav_msgs/Odometry, odom → base_link),  TF odom → base_link
-  base_link 원점 = 뒷차축 중심(지면). 자전거 모델:
-     ds = (dL + dR)/2,  dyaw = ds·tan(δ)/L  (yaw_source: steering)  또는  (dR − dL)/track (wheel_diff)
-엔코더 데이터가 끊기거나 엔코더 고장이면 /odom·TF 발행을 중단한다 (SLAM 이 잘못된 odom 을 쓰지 않도록).
+  입력  /scan (sensor_msgs/LaserScan, sllidar C1)
+  출력  /odom (nav_msgs/Odometry),  TF odom → base_link (스캔 시각 기준)
+        /scan_filtered (자기 차체·트레일러 영역을 제외한 스캔 → SLAM Toolbox 입력)
+        /rc/odom_status (std_msgs/String JSON: 정합 품질, 상태)
+
+SLAM Toolbox 는 odom → base_link TF 가 있어야 동작하므로, 이 노드가 엔코더 odom 을 대신한다.
+정합에 실패한 스캔은 자세를 갱신하지도, /odom·TF 를 발행하지도 않는다 (추정값으로 메우지 않음).
+알고리즘 본체는 scan_matcher.py (ROS 비의존, 단위 테스트 있음).
 """
-import json
 import math
 import time
 
@@ -15,11 +17,20 @@ import rclpy.executors
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64, String
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
-from .common import load_config
+from .common import dumps, load_config
+
+try:
+    import numpy as np
+    from . import scan_matcher as sm
+    _IMPORT_ERROR = None
+except ImportError as e:   # numpy 없음 → 노드는 떠서 원인을 상태로 알린다
+    np = sm = None
+    _IMPORT_ERROR = str(e)
 
 
 class OdometryNode(Node):
@@ -27,84 +38,88 @@ class OdometryNode(Node):
         super().__init__('rc_odometry')
         self.declare_parameter('config_file', '')
         cfg = load_config(self.get_parameter('config_file').value or None)
-        self.r = cfg['vehicle']['wheel_diameter_m'] / 2.0
-        self.L = cfg['vehicle']['wheelbase_m']
-        self.track = cfg['vehicle']['track_width_m']
-        self.names = (cfg['motors']['left']['name'], cfg['motors']['right']['name'])
-        oc = cfg['odometry']
-        self.yaw_source = oc.get('yaw_source', 'steering')
-        self.publish_tf = oc.get('publish_tf', True)
-        self.timeout = oc.get('input_timeout_s', 0.3)
-        self.x = self.y = self.yaw = 0.0
-        self.prev = None
-        self.prev_t = None
-        self.steer = 0.0
-        self.steer_t = 0.0
-        self.enc_ok = False
-        self.enc_ok_t = 0.0
+        lc = cfg['lidar']
+        oc = cfg.get('odometry') or {}
+        self.mount = (float(lc.get('x', 0.0)), float(lc.get('y', 0.0)), float(lc.get('yaw', 0.0)))
+        self.rmin = float(lc.get('mask_min_range_m', 0.12))
+        self.rmax = float(oc.get('max_range_m', 8.0))
+        self.sectors = [(math.radians(a), math.radians(b)) for a, b in (lc.get('mask_sectors_deg') or [])]
+        self.publish_tf = bool(oc.get('publish_tf', True))
+        self.lo = sm.LaserOdometry({k: oc.get(k) for k in sm.DEFAULTS}) if sm else None
+        self.status = {'status': 'NO_SCAN', 'ok': False}
+        self.proc_ms = None
+        self.scan_rx_t = 0.0
+        self.last_ok_t = 0.0
         self.pub = self.create_publisher(Odometry, '/odom', 20)
+        self.pub_scan = self.create_publisher(LaserScan, '/scan_filtered', 5)
+        self.pub_status = self.create_publisher(String, '/rc/odom_status', 10)
         self.tfb = TransformBroadcaster(self)
-        self.create_subscription(JointState, '/joint_states', self._on_js, 20)
-        self.create_subscription(Float64, '/steering/angle_cmd', self._on_steer, 20)
-        self.create_subscription(String, '/rc/vehicle_status', self._on_status, 10)
-        self.get_logger().info(f'Odometry yaw_source={self.yaw_source} L={self.L} track={self.track}')
+        # 처리 지연 시 오래된 스캔이 쌓이지 않도록 최신 1개만 유지
+        qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(LaserScan, '/scan', self._on_scan, qos)
+        self.create_timer(0.2, self._publish_status)
+        if _IMPORT_ERROR:
+            self.get_logger().error(f'numpy 불러오기 실패 → 라이다 odom 비활성: {_IMPORT_ERROR} '
+                                    '(컨테이너에 python3-numpy 설치 필요)')
+        elif sm.cKDTree is None:
+            self.get_logger().warn('scipy 없음 → 최근접 탐색을 numpy 전수 비교로 수행 (느림). '
+                                   '권장: apt install python3-scipy')
+        self.get_logger().info(f'라이다 odom: mount={self.mount} 범위 {self.rmin}–{self.rmax} m, '
+                               f'제외 구간(deg)={lc.get("mask_sectors_deg") or []}')
 
-    def _on_steer(self, m):
-        self.steer, self.steer_t = m.data, time.monotonic()
-
-    def _on_status(self, m):
-        try:
-            self.enc_ok = bool(json.loads(m.data).get('encoders_ok'))
-            self.enc_ok_t = time.monotonic()
-        except ValueError:
-            self.enc_ok = False
-
-    def _on_js(self, js):
-        try:
-            iL, iR = js.name.index(self.names[0]), js.name.index(self.names[1])
-        except ValueError:
+    def _on_scan(self, scan):
+        t0 = time.monotonic()
+        self.scan_rx_t = t0
+        if sm is None:
+            self.status = {'status': 'NO_NUMPY', 'ok': False, 'reason': _IMPORT_ERROR}
             return
-        now = time.monotonic()
-        pos = (js.position[iL], js.position[iR])
-        t = js.header.stamp.sec + js.header.stamp.nanosec * 1e-9
-        healthy = self.enc_ok and now - self.enc_ok_t < 1.0
-        if self.yaw_source == 'steering':
-            healthy = healthy and now - self.steer_t < self.timeout
-        if self.prev is None or not healthy or t - self.prev_t > self.timeout or t <= self.prev_t:
-            self.prev, self.prev_t = pos, t     # 재시작: 위치는 유지, 누락 구간은 적분하지 않음
-            return
-        dt = t - self.prev_t
-        dL = (pos[0] - self.prev[0]) * self.r
-        dR = (pos[1] - self.prev[1]) * self.r
-        self.prev, self.prev_t = pos, t
-        ds = (dL + dR) / 2.0
-        if self.yaw_source == 'wheel_diff':
-            dyaw = (dR - dL) / self.track
-        else:
-            dyaw = ds * math.tan(self.steer) / self.L
-        mid = self.yaw + dyaw / 2.0
-        self.x += ds * math.cos(mid)
-        self.y += ds * math.sin(mid)
-        self.yaw = math.atan2(math.sin(self.yaw + dyaw), math.cos(self.yaw + dyaw))
+        n = len(scan.ranges)
+        keep, r, a = sm.beam_mask(n, scan.angle_min, scan.angle_increment, scan.ranges,
+                                  max(self.rmin, scan.range_min), min(self.rmax, scan.range_max), self.sectors)
+        # SLAM 용 필터 스캔 (제외 빔 = +inf: REP-117 '측정 범위 밖')
+        fs = LaserScan()
+        fs.header = scan.header
+        fs.angle_min, fs.angle_max, fs.angle_increment = scan.angle_min, scan.angle_max, scan.angle_increment
+        fs.time_increment, fs.scan_time = scan.time_increment, scan.scan_time
+        fs.range_min, fs.range_max = scan.range_min, scan.range_max
+        fr = np.where(keep, r, np.inf)
+        fs.ranges = fr.astype(np.float32).tolist()
+        fs.intensities = list(scan.intensities)
+        self.pub_scan.publish(fs)
 
-        qz, qw = math.sin(self.yaw / 2.0), math.cos(self.yaw / 2.0)
+        pts = sm.to_base_points(r[keep], a[keep], self.mount)
+        t = scan.header.stamp.sec + scan.header.stamp.nanosec * 1e-9
+        res = self.lo.update(pts, t)
+        self.status = res
+        self.proc_ms = (time.monotonic() - t0) * 1000.0
+        if not res.get('ok'):
+            return
+        self.last_ok_t = time.monotonic()
+        self._publish_odom(scan.header.stamp, res)
+
+    def _publish_odom(self, stamp, res):
+        x, y, th = self.lo.pose
+        qz, qw = math.sin(th / 2.0), math.cos(th / 2.0)
         od = Odometry()
-        od.header.stamp = js.header.stamp
+        od.header.stamp = stamp
         od.header.frame_id = 'odom'
         od.child_frame_id = 'base_link'
-        od.pose.pose.position.x = self.x
-        od.pose.pose.position.y = self.y
+        od.pose.pose.position.x = x
+        od.pose.pose.position.y = y
         od.pose.pose.orientation.z = qz
         od.pose.pose.orientation.w = qw
-        od.twist.twist.linear.x = ds / dt
-        od.twist.twist.angular.z = dyaw / dt
+        od.twist.twist.linear.x = self.lo.v
+        od.twist.twist.angular.z = self.lo.w
+        # 공분산: 정합 잔차 기반의 대략값. 퇴화(복도 등) 시 크게 표시
+        rms = res.get('rms_m') or 0.02
+        k = 100.0 if res.get('degenerate') else 1.0
         pc = [0.0] * 36
-        pc[0] = pc[7] = 0.01
-        pc[14] = pc[21] = pc[28] = 1e6        # 2D: z, roll, pitch 미사용
-        pc[35] = 0.05
+        pc[0] = pc[7] = max(1e-4, (rms * 2) ** 2) * k
+        pc[14] = pc[21] = pc[28] = 1e6          # 2D: z, roll, pitch 미사용
+        pc[35] = max(1e-4, (rms * 2) ** 2) * k
         od.pose.covariance = pc
         tc = [0.0] * 36
-        tc[0], tc[7], tc[35] = 0.01, 1e6, 0.05
+        tc[0], tc[7], tc[35] = 0.01 * k, 1e6, 0.02 * k
         tc[14] = tc[21] = tc[28] = 1e6
         od.twist.covariance = tc
         self.pub.publish(od)
@@ -112,11 +127,27 @@ class OdometryNode(Node):
             tf = TransformStamped()
             tf.header = od.header
             tf.child_frame_id = 'base_link'
-            tf.transform.translation.x = self.x
-            tf.transform.translation.y = self.y
+            tf.transform.translation.x = x
+            tf.transform.translation.y = y
             tf.transform.rotation.z = qz
             tf.transform.rotation.w = qw
             self.tfb.sendTransform(tf)
+
+    def _publish_status(self):
+        now = time.monotonic()
+        st = dict(self.status)
+        if now - self.scan_rx_t > 1.0:
+            st = {'status': 'NO_SCAN', 'ok': False}
+        st.update({
+            'source': 'lidar_scan_matching',
+            'ok': bool(st.get('ok')) and now - self.last_ok_t < 0.5,
+            'proc_ms': None if self.proc_ms is None else round(self.proc_ms, 1),
+            'resets': self.lo.resets if self.lo else 0,
+            'v': round(self.lo.v, 3) if self.lo else None,
+            'kdtree': bool(sm and sm.cKDTree is not None),
+            'stamp': time.time(),
+        })
+        self.pub_status.publish(String(data=dumps(st)))
 
 
 def main():

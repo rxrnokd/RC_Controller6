@@ -2,16 +2,18 @@
 여기서 하나의 최종 명령 /rc/drive_cmd 로 합쳐져 공통 차량 제어부(vehicle_node)로 간다.
 
   입력  /rc/command_request (String JSON: {client, role, type, ...}) ← web_bridge
-        /rc/vehicle_status, /odom, TF map→base_link
+        /rc/vehicle_status, /odom + /rc/odom_status (라이다 스캔매칭 odom), TF map→base_link
   출력  /rc/drive_cmd (20 Hz), /rc/control_state (10 Hz), /rc/command_reply, /rc/settings, /rc/hw_request
 
 규칙
   * E-STOP: 모든 클라이언트가 걸 수 있음(래치). 해제는 UI 클라이언트만.
   * MANUAL: 제어권(owner)을 가진 UI 한 곳만 주행 명령 가능 → 동시 제어 충돌 방지.
-  * AUTO_PARK: config autopark.enabled=true + 자동주차 클라이언트 ready + 피드백(엔코더/odom/SLAM 위치) 유효
-               일 때만 진입. 진입 후에는 autopark 클라이언트의 속도(m/s)/조향(rad) 명령만 수용 (Open-loop 불가).
+  * AUTO_PARK: config autopark.enabled=true + 자동주차 클라이언트 ready + 피드백(라이다 odom/SLAM 위치/트레일러각)
+               유효 + 속도 폐루프 제어(PI) 가능일 때만 진입. 진입 후에는 autopark 클라이언트의 속도(m/s)/조향(rad)
+               명령만 수용 (Open-loop 불가). ※ 엔코더 미사용(use_encoders: false) 이면 PI 가 없으므로 진입 불가.
                피드백 손실·클라이언트 끊김 → 즉시 정지 후 MANUAL 로 복귀 (Open-loop 로 자동 전환하지 않음).
-  * 모드 전환: 먼저 정지 명령 → 실제 정지 확인 → 전환. 제한시간 내 정지 못하면 전환 취소.
+  * 모드 전환: 먼저 정지 명령 → 실제 정지 확인(라이다 odom 속도, 엔코더 사용 시 엔코더 속도) → 전환.
+               제한시간 내 정지 확인 못하면 AUTO_PARK 전환 취소 / MANUAL 은 정지 명령 상태로 전환.
   * 명령 타임아웃: 제어 주체의 마지막 명령이 safety.command_timeout_s 보다 오래되면 정지.
 """
 import collections
@@ -47,7 +49,10 @@ class CommandManager(Node):
         self.pending = None            # (target_mode, since, reason)
         self.stopped_since = None
         self.estop = False
-        self.control_mode = self.cfg['speed_control'].get('default_mode', 'PI')
+        m = self.cfg['motors']
+        self.use_enc = bool(m.get('use_encoders', m.get('encoders_verified', False)))
+        # 엔코더가 없으면 속도 측정 기반 PI 불가 → Open-loop PWM 고정
+        self.control_mode = self.cfg['speed_control'].get('default_mode', 'OPEN_LOOP') if self.use_enc else 'OPEN_LOOP'
         self.owner = None
         self.clients = {}              # id → {role, name, seen, ready}
         self.last_drive = None         # (client, t, payload)
@@ -55,6 +60,9 @@ class CommandManager(Node):
         self.vstat = {}
         self.vstat_t = 0.0
         self.odom_t = 0.0
+        self.odom_v = None
+        self.ostat = {}
+        self.ostat_t = 0.0
         self.events = collections.deque(maxlen=12)
         self.seq = 0
         self.tf_buf = Buffer()
@@ -67,6 +75,7 @@ class CommandManager(Node):
         self.create_subscription(String, '/rc/command_request', self._on_req, 50)
         self.create_subscription(String, '/rc/vehicle_status', self._on_vstat, 10)
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
+        self.create_subscription(String, '/rc/odom_status', self._on_ostat, 10)
         self.create_timer(0.05, self._tick)
         self.create_timer(0.1, self._publish_state)
         self._event('Command Manager 시작 — MANUAL')
@@ -80,9 +89,21 @@ class CommandManager(Node):
         self.pub_reply.publish(String(data=dumps({'client': client, 'type': typ, 'ok': ok, 'msg': msg})))
 
     def _speed(self):
-        if time.monotonic() - self.vstat_t > 1.0:
-            return None
-        return self.vstat.get('speed_m_s')
+        """실측 차량 속도 [m/s] 또는 None. 라이다 odom 우선, 엔코더 사용 시 엔코더 속도."""
+        now = time.monotonic()
+        if self._laser_odom_ok() and self.odom_v is not None:
+            return self.odom_v
+        if self.use_enc and now - self.vstat_t <= 1.0:
+            return self.vstat.get('speed_m_s')
+        return None
+
+    def _laser_odom_ok(self, allow_degenerate=True):
+        now = time.monotonic()
+        if now - self.odom_t > self.ap['feedback_timeout_s'] or now - self.ostat_t > 1.0:
+            return False
+        if not self.ostat.get('ok'):
+            return False
+        return allow_degenerate or self.ostat.get('status') != 'DEGENERATE'
 
     def _map_pose_ok(self):
         try:
@@ -96,8 +117,10 @@ class CommandManager(Node):
         now = time.monotonic()
         fb = {
             'vehicle_status': now - self.vstat_t < self.ap['feedback_timeout_s'] * 2,
-            'encoders_ok': bool(self.vstat.get('encoders_ok')) and now - self.vstat_t < 1.0,
-            'odom': now - self.odom_t < self.ap['feedback_timeout_s'],
+            # 라이다 스캔매칭 odom: 최근 정합 성공 + 퇴화(복도 등) 아님
+            'odom': self._laser_odom_ok(allow_degenerate=False),
+            # 속도 폐루프(PI) 가능 = 엔코더 사용 + 엔코더 정상
+            'speed_control': self.use_enc and bool(self.vstat.get('encoders_ok')) and now - self.vstat_t < 1.0,
             'map_pose': self._map_pose_ok(),
             # 트레일러 후진 주차는 MT6701 연결각 실측이 필수
             'trailer_angle': now - self.vstat_t < 1.0 and
@@ -123,13 +146,15 @@ class CommandManager(Node):
             r.append('자동주차 클라이언트 ready=false')
         if self.estop:
             r.append('E-STOP 활성')
-        if self.control_mode != 'PI':
-            r.append('속도제어 모드가 PI 가 아님')
         fb = self._feedback()
-        if not fb['encoders_ok']:
+        if not self.use_enc:
+            r.append('속도 폐루프 제어 불가 (DC 모터 엔코더 미사용) — 자동주차 속도제어 방식 미정')
+        elif not fb['speed_control']:
             r.append('엔코더 피드백 없음/고장')
+        elif self.control_mode != 'PI':
+            r.append('속도제어 모드가 PI 가 아님')
         if not fb['odom']:
-            r.append('/odom 없음')
+            r.append('라이다 odom 없음/저하 (정합 실패 또는 복도형 퇴화)')
         if self.ap.get('require_map_pose', True) and not fb['map_pose']:
             r.append('SLAM 위치(map→base_link) 없음')
         if not fb['trailer_angle']:
@@ -160,8 +185,16 @@ class CommandManager(Node):
         except ValueError:
             pass
 
-    def _on_odom(self, _m):
+    def _on_odom(self, m):
         self.odom_t = time.monotonic()
+        self.odom_v = m.twist.twist.linear.x
+
+    def _on_ostat(self, m):
+        try:
+            self.ostat = json.loads(m.data)
+            self.ostat_t = time.monotonic()
+        except ValueError:
+            pass
 
     def _on_req(self, m):
         try:
@@ -254,6 +287,8 @@ class CommandManager(Node):
             cm = d.get('control_mode')
             if cm not in ('PI', 'OPEN_LOOP'):
                 return self._reply(cid, typ, False, 'PI 또는 OPEN_LOOP')
+            if cm == 'PI' and not self.use_enc:
+                return self._reply(cid, typ, False, 'PI 불가: DC 모터 엔코더 미사용 (Open-loop PWM 만 가능)')
             if self.mode != MANUAL or not self._can_configure(cid):
                 return self._reply(cid, typ, False, 'MANUAL 모드의 제어권 UI 만 가능')
             sp = self._speed()
@@ -331,8 +366,10 @@ class CommandManager(Node):
                 reasons.append('자동주차 클라이언트 끊김')
             elif not ap.get('ready'):
                 reasons.append('자동주차 클라이언트 ready 해제')
-            if not fb['encoders_ok'] or not fb['odom']:
-                reasons.append('엔코더/odom 피드백 손실')
+            if not fb['speed_control']:
+                reasons.append('속도 피드백(엔코더) 손실')
+            if not fb['odom']:
+                reasons.append('라이다 odom 손실/저하')
             if self.ap.get('require_map_pose', True) and not fb['map_pose']:
                 reasons.append('SLAM 위치 손실')
             if not fb['trailer_angle']:
@@ -349,7 +386,8 @@ class CommandManager(Node):
                 self.stopped_since = self.stopped_since or now
             else:
                 self.stopped_since = None
-            # 엔코더가 없으면(sp None) 속도 확인 불가 → 정지 출력 유지 후 제한시간 경과 시 MANUAL 로만 전환
+            # 실측 속도가 없으면(sp None: 라이다 odom 실패 등) 정지 확인 불가 → 정지 출력 유지 후
+            # 제한시간 경과 시 MANUAL 로만 전환
             if self.stopped_since and now - self.stopped_since > 0.3:
                 if target == AUTO and self._autopark_block_reasons():
                     self._event('AUTO_PARK 전환 취소: 조건 불충족')

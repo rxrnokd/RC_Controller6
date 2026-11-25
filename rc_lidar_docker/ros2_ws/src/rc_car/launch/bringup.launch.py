@@ -1,11 +1,13 @@
-"""전체 실행: 라이다(sllidar C1) + 정적 TF + 차량제어 + Odometry + Command Manager + 웹 브리지 + SLAM Toolbox
+"""전체 실행: 라이다(sllidar C1) + 정적 TF + 차량제어 + 라이다 Odometry + Command Manager + 웹 브리지 + SLAM Toolbox
 
   ros2 launch rc_car bringup.launch.py                       # 새 지도 작성 (mapping)
   ros2 launch rc_car bringup.launch.py map:=/rc_lidar_docker/maps/room1               # 저장 지도 이어서 작성
   ros2 launch rc_car bringup.launch.py slam_mode:=localization map:=/rc_lidar_docker/maps/room1  # 위치추정만
   ros2 launch rc_car bringup.launch.py slam:=false lidar:=false                        # 차량/웹만 (하드웨어 점검)
 
-기존 config/slam.yaml 은 수정하지 않고, 프레임 이름(odom/base_link/map, /scan)만 덮어쓴 사본을 /tmp 에 만들어 사용.
+기존 config/slam.yaml 은 수정하지 않고, 프레임 이름(odom/base_link/map)과 스캔 토픽만 덮어쓴 사본을 /tmp 에 만들어 사용.
+odom → base_link 는 엔코더가 아니라 odometry_node(라이다 스캔매칭)가 발행하고, SLAM 은 차체·트레일러를
+제외한 /scan_filtered 를 입력으로 쓴다.
 """
 import os
 
@@ -55,7 +57,7 @@ def _setup(context):
         with open(cfg['slam']['config_file'], 'r', encoding='utf-8') as f:
             sy = yaml.safe_load(f) or {}
         over = {'odom_frame': 'odom', 'base_frame': 'base_link', 'map_frame': 'map',
-                'scan_topic': '/scan', 'use_sim_time': False,
+                'scan_topic': '/scan_filtered', 'use_sim_time': False,
                 'mode': 'localization' if slam_mode == 'localization' else 'mapping'}
         if map_file:
             over.update({'map_file_name': map_file, 'map_start_at_dock': True})

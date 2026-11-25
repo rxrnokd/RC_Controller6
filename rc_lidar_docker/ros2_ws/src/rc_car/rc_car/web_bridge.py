@@ -58,6 +58,8 @@ class BridgeNode(Node):
         self.replies = []
         self.odom = None
         self.odom_t = 0.0
+        self.ostat = None
+        self.ostat_t = 0.0
         self.map_msg = None
         self.map_ver = 0
         self.map_t = 0.0
@@ -71,6 +73,7 @@ class BridgeNode(Node):
         self.create_subscription(String, '/rc/control_state', self._on_cstate, 10)
         self.create_subscription(String, '/rc/command_reply', self._on_reply, 50)
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
+        self.create_subscription(String, '/rc/odom_status', self._on_ostat, 10)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
         map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -108,6 +111,15 @@ class BridgeNode(Node):
         with self.lock:
             self.odom = m
             self.odom_t = time.monotonic()
+
+    def _on_ostat(self, m):
+        try:
+            d = json.loads(m.data)
+        except ValueError:
+            return
+        with self.lock:
+            self.ostat = d
+            self.ostat_t = time.monotonic()
 
     def _on_scan(self, m):
         t = time.monotonic()
@@ -464,6 +476,7 @@ class WebServer:
             vstat, cstate = n.vstat, n.cstate
             vt, ct = getattr(n, 'vstat_t', 0.0), getattr(n, 'cstate_t', 0.0)
             odom, odom_t = n.odom, n.odom_t
+            ostat = n.ostat if now - n.ostat_t < 1.0 else None
             scan_t, scan_hz = n.scan_t, len(n.scan_times) / 2.0
             map_msg, map_t = n.map_msg, n.map_t
             replies, n.replies = n.replies, []
@@ -482,12 +495,13 @@ class WebServer:
                   'yaw': round(_yaw(odom.pose.pose.orientation), 4),
                   'v': round(odom.twist.twist.linear.x, 3), 'w': round(odom.twist.twist.angular.z, 3)}
         lidar_ok = now - scan_t < 1.0
-        odom_ok = od is not None
+        odom_ok = od is not None and bool(ostat and ostat.get('ok'))
         map_tf_ok = bool(tf_map and tf_map[3] < 1.0)
         map_ok = map_msg is not None
         slam = {'lidar_ok': lidar_ok, 'scan_hz': scan_hz, 'odom_ok': odom_ok, 'map_tf_ok': map_tf_ok,
                 'map_received': map_ok, 'map_age_s': round(now - map_t, 1) if map_ok else None,
-                # 라이다·엔코더 odom·TF·지도가 모두 정상일 때만 SLAM 동작 중으로 표시
+                'odom_status': ostat,
+                # 라이다·라이다 odom·TF·지도가 모두 정상일 때만 SLAM 동작 중으로 표시
                 'ready': lidar_ok and odom_ok and map_tf_ok and map_ok}
         return {
             'type': 'state', 't': time.time(),

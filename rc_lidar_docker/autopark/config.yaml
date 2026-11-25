@@ -101,8 +101,8 @@ tracking_mpc:
 feedback:                      # 실제 구동(AUTO_PARK) 허용 조건 — 가상값으로 대체하지 않음
   max_state_age_s: 0.5         # 마지막 state 메시지 수신 후
   max_pose_age_s: 0.5          # map→base_link (SLAM) 위치 나이
-  max_status_age_s: 0.5        # 차량 상태(트레일러각·엔코더) 나이
-  require_encoder_speed: true  # 엔코더 속도 피드백 필수 (현재 엔코더 고장 → 구동 차단됨)
+  max_status_age_s: 0.5        # 차량 상태(트레일러각) 나이
+  require_speed_feedback: true # 속도 실측 필수 (라이다 odom, 엔코더 사용 시 엔코더)
   require_steering_calibrated: true
   start_tol_xy_m: 0.10         # 계획 시작 자세와 현재 자세 차이 허용 (넘으면 재계획 요구)
   start_tol_yaw_rad: 0.15

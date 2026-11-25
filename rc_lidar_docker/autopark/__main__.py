@@ -115,7 +115,7 @@ class FeedbackMonitor:
         elif pose and pose.get('frame') == 'odom':
             chk['pose'] = {'ok': False, 'source': 'odom 만 있음', 'reason': 'SLAM 위치(map 프레임) 없음'}
         else:
-            chk['pose'] = {'ok': False, 'reason': '위치 없음 (SLAM/odom TF 미수신 — 엔코더 odom 이 없으면 SLAM 도 위치를 못 냄)'}
+            chk['pose'] = {'ok': False, 'reason': '위치 없음 (SLAM/odom TF 미수신 — 라이다 odom 이 없으면 SLAM 도 위치를 못 냄)'}
         if pose and chk['pose'].get('ok'):
             rep['values'].update({'x': pose['x'], 'y': pose['y'], 'th': pose['yaw']})
         veh = st.get('vehicle')
@@ -132,12 +132,23 @@ class FeedbackMonitor:
             rep['values']['beta'] = tr['angle_rad']
         else:
             chk['trailer'] = {'ok': False, 'reason': 'MT6701 각도 없음 (trailer.ppr 미설정 또는 상태 지연)'}
+        # 속도 실측: 라이다 스캔매칭 odom (엔코더 사용 시 엔코더 우선). 없으면 대체값 사용 안 함
+        slam = st.get('slam') or {}
+        ostat = slam.get('odom_status') or {}
+        od = st.get('odom')
         if vt_ok and veh.get('encoders_ok') and veh.get('speed_m_s') is not None:
             chk['speed'] = {'ok': True, 'source': 'DC 모터 엔코더'}
             rep['values']['v'] = veh['speed_m_s']
+        elif od and slam.get('odom_ok') and ostat.get('status') == 'OK':
+            chk['speed'] = {'ok': True, 'source': '라이다 스캔매칭 odom'}
+            rep['values']['v'] = od['v']
         else:
-            chk['speed'] = {'ok': not c['require_encoder_speed'],
-                            'reason': '엔코더 속도 피드백 없음/고장 (대체값 사용 안 함)'}
+            chk['speed'] = {'ok': not c.get('require_speed_feedback', c.get('require_encoder_speed', True)),
+                            'reason': f'속도 피드백 없음 (라이다 odom {ostat.get("status", "상태 없음")})'}
+        # 차량 쪽 속도 폐루프 제어(PI)는 엔코더가 있어야 함 — 없으면 v 명령을 실행할 수단이 없음
+        enc_used = bool((veh or {}).get('encoders_used'))
+        chk['speed_control'] = {'ok': enc_used,
+                                'reason': '' if enc_used else '차량 속도 폐루프 제어 불가 (엔코더 미사용) — 자동주차 속도제어 방식 미정'}
         st_cal = bool(((veh or {}).get('steering') or {}).get('calibrated'))
         chk['steering'] = {'ok': st_cal or not c['require_steering_calibrated'],
                            'reason': '' if st_cal else '조향 미보정 (vehicle.yaml steering.calibrated)'}

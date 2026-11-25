@@ -208,21 +208,36 @@ class TestTracking(unittest.TestCase):
 
 
 class TestFeedback(unittest.TestCase):
-    def test_encoder_fault_blocks_motion(self):
+    def test_feedback_gating(self):
         cfg = test_cfg()
         st = {'t': 100.0, 'pose': {'frame': 'map', 'x': 1, 'y': 1, 'yaw': 0, 'age_s': 0.05},
-              'vehicle': {'stamp': 99.95, 'encoders_ok': False, 'speed_m_s': None,
+              'vehicle': {'stamp': 99.95, 'encoders_used': False, 'encoders_ok': False, 'speed_m_s': None,
                           'trailer': {'enabled': True, 'angle_rad': 0.1}, 'steering': {'calibrated': True},
                           'ultrasonic': []},
+              'odom': None, 'slam': {'odom_ok': False, 'odom_status': {'status': 'LOST', 'ok': False}},
               'control': {'autopark': {'enabled': True}, 'estop': False}}
-        rep = FeedbackMonitor(cfg).evaluate(st, 10.0, 10.05)
+        mon = FeedbackMonitor(cfg)
+        rep = mon.evaluate(st, 10.0, 10.05)
         self.assertFalse(rep['motion_ok'])
-        self.assertTrue(rep['planning_start_ok'])
+        self.assertTrue(rep['planning_start_ok'])      # 계획·검증은 가능
         self.assertNotIn('v', rep['values'])           # 속도 대체값 생성 금지
-        st['vehicle'].update({'encoders_ok': True, 'speed_m_s': 0.0})
-        self.assertTrue(FeedbackMonitor(cfg).evaluate(st, 10.0, 10.05)['motion_ok'])
+        # 라이다 odom 정상 → 속도 실측은 생기지만, 엔코더가 없어 차량 속도 폐루프 제어가 불가 → 구동 차단 유지
+        st['odom'] = {'v': 0.0}
+        st['slam'] = {'odom_ok': True, 'odom_status': {'status': 'OK', 'ok': True}}
+        rep = mon.evaluate(st, 10.0, 10.05)
+        self.assertEqual(rep['values']['v'], 0.0)
+        self.assertTrue(rep['checks']['speed']['ok'])
+        self.assertFalse(rep['checks']['speed_control']['ok'])
+        self.assertFalse(rep['motion_ok'])
+        # 퇴화(복도형) 상태의 라이다 odom 속도는 쓰지 않음
+        st['slam']['odom_status']['status'] = 'DEGENERATE'
+        self.assertNotIn('v', mon.evaluate(st, 10.0, 10.05)['values'])
+        st['slam']['odom_status']['status'] = 'OK'
+        # (엔코더 사용 구성) 모든 조건 충족 시에만 허용, map 이 아닌 odom 위치로는 불가
+        st['vehicle'].update({'encoders_used': True, 'encoders_ok': True, 'speed_m_s': 0.0})
+        self.assertTrue(mon.evaluate(st, 10.0, 10.05)['motion_ok'])
         st['pose']['frame'] = 'odom'
-        self.assertFalse(FeedbackMonitor(cfg).evaluate(st, 10.0, 10.05)['motion_ok'])
+        self.assertFalse(mon.evaluate(st, 10.0, 10.05)['motion_ok'])
 
 
 if __name__ == '__main__':

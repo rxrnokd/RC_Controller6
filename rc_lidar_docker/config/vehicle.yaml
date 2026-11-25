@@ -32,15 +32,15 @@ power:
 motors:
   pwm_frequency_hz: 1000   # pigpio DMA PWM. 1000 Hz → 200 단계 분해능 (MDD3A 최대 20 kHz (DS))
   pwm_range: 1000          # 내부 duty 스케일 (pigpio가 실제 분해능으로 매핑)
+  # DC 모터 엔코더 사용 여부. 현재 사용하지 않음(false) → 엔코더 GPIO 를 설정하지 않고,
+  # PI 속도제어 불가(Open-loop PWM 만), 차량 위치/속도는 라이다 스캔매칭 odom 으로 추정.
+  # 나중에 엔코더를 다시 쓰려면 README §6-3·6-4 로 동작을 확인한 뒤 true.
+  use_encoders: false
   encoder_pull: up         # 엔코더 입력 풀업(up/down/off). 엔코더 전원은 반드시 3.3 V (5 V 출력은 GPIO 손상)
-  # 엔코더 분해능 (DS): 자석 극 11 line, AB 2상, 감속비 1:30
+  # 엔코더 분해능 (DS): 자석 극 11 line, AB 2상, 감속비 1:30  (use_encoders: true 일 때만 사용)
   encoder_ppr: 11          # 모터축 1회전당 A상 펄스 수
   quadrature_multiplier: 4 # A/B 양쪽 모든 엣지 카운트
   gear_ratio: 30.0         # → 바퀴축 1회전 = 11 * 4 * 30 = 1320 count  (실측으로 확인 권장)
-  # 엔코더 동작 검증 완료 표시 — README §6-3(바퀴 1회전 ≈ +1.00), §6-4(방향) 확인 후 true 로 변경.
-  # false(또는 이 줄이 없음)인 동안: PI 속도제어 차단(Open-loop 수동만 가능), 속도·/odom 미발행
-  # (→ SLAM 위치 없음), 자동주차 차단. 신호 없는 엔코더(카운트 0 고정)를 '정지'로 오인하지 않기 위함.
-  encoders_verified: false
   rated_rpm: 280           # (DS) 정격 속도(감속 후). 목표 RPM 절대 상한
   no_load_rpm: 320         # (DS) 12 V 무부하 속도. PI 피드포워드 계산에 사용
   left:                    # (GPIO) 엔코더 DC 모터1
@@ -62,7 +62,7 @@ motors:
 
 speed_control:
   loop_hz: 50
-  default_mode: PI         # PI | OPEN_LOOP  (웹 UI에서 정지 상태일 때 전환 가능)
+  default_mode: OPEN_LOOP  # PI | OPEN_LOOP  (PI 는 motors.use_encoders: true 일 때만 가능)
   max_rpm_default: 100     # 웹 UI 슬라이더 초기값 (0 ~ rated_rpm)
   max_pwm_default: 0.35    # 웹 UI 슬라이더 초기값 (0 ~ 하드웨어 PWM 상한)
   kp: 0.004                # [duty / rpm]   (실측 튜닝 필요)
@@ -148,11 +148,35 @@ lidar:
   z: 0.10
   yaw: 0.0                   # 라이다 0° 방향이 차량 전방과 다르면 보정 (rad)
   measured: false
+  # 자기 차체·트레일러 제외 (라이다 odom 과 SLAM 입력 /scan_filtered 에 적용)
+  mask_min_range_m: 0.12     # 이보다 가까운 점 제외 (차체). 실제 장착 후 웹 UI 스캔을 보고 조정
+  # 제외 각도 구간 [시작, 끝] (deg, 라이다 프레임, 0 = 라이다 정면, 반시계 +). 시작→끝 반시계 방향 구간.
+  # 트레일러가 스캔에 보이면 트레일러가 움직이는 전체 범위를 넣을 것. 예) 후방 ±40°: [[140, -140]]
+  mask_sectors_deg: []
 
+# ---------------------------------------------------------------------
+# 라이다 스캔매칭 odom (엔코더 대신 odom → base_link 추정, SLAM Toolbox 입력)
+# 값은 초기값 — 실제 환경에서 웹 UI 'Odom' 상태(일치점·잔차)를 보며 조정
+# ---------------------------------------------------------------------
 odometry:
-  yaw_source: steering       # steering: v*tan(δ)/L (명령 조향각 사용) | wheel_diff: (vR-vL)/track (엔코더만 사용)
+  source: lidar
   publish_tf: true
-  input_timeout_s: 0.3
+  max_range_m: 8.0           # 정합에 쓸 최대 거리 (먼 점은 각도 오차로 부정확)
+  voxel_m: 0.04              # 점 간격 축소 (작을수록 정확·느림)
+  max_points: 400
+  max_iterations: 25
+  max_corr_m: 0.30           # 대응점 최대 거리 (반복마다 min_corr_m 까지 줄어듦)
+  min_corr_m: 0.05
+  min_matches: 40            # 이보다 적으면 정합 실패 → 자세 갱신·발행 안 함
+  min_inlier_ratio: 0.35
+  max_rms_m: 0.03            # 정합 잔차 상한
+  degenerate_min_eig: 0.03   # 복도처럼 한 방향 벽만 보이면 DEGENERATE 표시 (자동주차 차단)
+  keyframe_dist_m: 0.15      # 키프레임 교체 이동량
+  keyframe_angle_rad: 0.17
+  max_step_m: 0.30           # 스캔 1개 사이 최대 이동 (넘으면 오정합으로 판단)
+  max_step_rad: 0.50
+  lost_reset_scans: 5        # 연속 실패 시 키프레임 재설정 (odom 자세가 튈 수 있음 → resets 증가)
+  speed_filter_s: 0.3        # 속도 저역통과 시간상수
 
 slam:
   config_file: /rc_lidar_docker/config/slam.yaml   # 기존 파일 재사용
@@ -171,7 +195,7 @@ autopark:
   # 자동주차 알고리즘(노트북)이 준비되기 전까지 false 유지 → AUTO_PARK 모드 진입 불가
   enabled: false
   require_map_pose: true     # map→base_link TF(SLAM 위치추정)가 유효해야 진입/유지
-  feedback_timeout_s: 0.5    # 엔코더/odom 피드백 손실 판정
+  feedback_timeout_s: 0.5    # 라이다 odom 피드백 손실 판정
 
 web:
   port: 8080

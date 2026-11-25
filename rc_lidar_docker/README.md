@@ -12,14 +12,15 @@
 |---|---|
 | Python/JS/셸 문법, YAML | ✅ Windows에서 확인 |
 | WebSocket 프레이밍(서버 ↔ 노트북 클라이언트), 지도 압축/PGM 저장 | ✅ Windows 단위 테스트 |
-| PI 제어·Anti-windup·출력 제한·타임아웃·E-STOP·엔코더 고장/극성 오류 래치·제어권 중재 로직 | ✅ ROS 스텁으로 로직만 확인 (실제 모터 아님) |
+| 출력 제한·타임아웃·E-STOP·제어권 중재 로직 (엔코더 사용 시 PI·고장 래치 포함) | ✅ ROS 스텁으로 로직만 확인 (실제 모터 아님) |
+| 라이다 스캔매칭 odom (`scan_matcher.py`) | ✅ 가상 방·복도 스캔으로 이동 복원·후진 속도 부호·퇴화 감지·실패 시 미갱신 단위 테스트. ⛔ **실제 라이다·실내 환경 미검증** |
 | pigpiod 명령 코드/워치독 스크립트 문법, 엔코더 엣지 처리량, PWM 출력 | ⛔ **하드웨어 미검증** |
 | 서보 조향, MT6701 각도, US-100 거리 | ⛔ **하드웨어 미검증** |
 | sllidar C1 launch 인자, SLAM Toolbox(Jazzy lifecycle) 연동, TF, 지도 저장/재사용 | ⛔ **미검증** |
 | 기존 Docker 이미지와 docker-compose 조합 | ⛔ **미검증** (기존 Dockerfile 내용을 보지 못함) |
 | 웹 UI 실제 브라우저 동작 | ⛔ **미검증** |
 | 자동주차 알고리즘 (Hybrid A* / Planning MPC / Tracking MPC) | ✅ 수학 단위 테스트 + 노트북↔브리지 메시지 흐름 확인 (테스트용 가정 치수). ⛔ **실제 차량 구동 미검증·차단 상태** (§12) |
-| **DC 모터 엔코더** | ❌ **현재 실차에서 데이터가 들어오지 않음** → PI 제어·odom·SLAM 위치·자동주차 구동 불가 |
+| **DC 모터 엔코더** | **사용 안 함** (`motors.use_encoders: false`) → 속도 PI 제어 없음(Open-loop PWM 만), 위치·속도는 **라이다로만** 추정 |
 
 **처음 실행할 때는 반드시 바퀴를 바닥에서 띄우고** §6 순서대로 하나씩 확인하세요.
 
@@ -35,8 +36,8 @@
 │  web_bridge ──/rc/command_request──► command_manager ──/rc/drive_cmd(20Hz)──► vehicle_node │
 │     ▲   (HTTP+WS, IP 제한)            (제어권·모드·타임아웃·E-STOP)          (공통 차량 제어부) │
 │     │                                                                         │ PI, PWM,     │
-│     └── /rc/vehicle_status /odom /map /scan TF ◄── odometry_node ◄─/joint_states┤ 서보, MT6701,│
-│                                                  slam_toolbox ◄── /scan ◄ sllidar│ 초음파      │
+│     └── /rc/vehicle_status /odom /map /scan TF ◄── odometry_node ◄── /scan ◄ sllidar  서보, MT6701,│
+│                                (라이다 스캔매칭) └─ /scan_filtered ──► slam_toolbox  │ 초음파      │
 └──────────────────────────────────────────────────────────────────────────────────┼──────────┘
                                                                   127.0.0.1:8888   │ 소켓
                                      Raspberry Pi OS:  pigpiod (DMA PWM · 5µs 엣지 샘플링) → GPIO
@@ -50,7 +51,13 @@
 | 컨테이너 안에서 pigpiod 실행 | `--privileged` + `/dev/mem` 필요, 컨테이너 재시작 시 DMA 정리 문제 |
 | **호스트에서 pigpiod, 컨테이너는 소켓으로 접속 (채택)** | DMA 기반 PWM(모든 핀), 서보 펄스, 5µs 샘플링 엣지 타임스탬프. 컨테이너는 privileged 불필요. pigpiod 는 `-l`(localhost 전용) |
 
-즉 **"하드웨어 타이밍이 중요한 부분만 Raspberry Pi OS(pigpiod)에서 실행"** 하고, 제어 로직·ROS·SLAM·웹은 모두 Docker 안에 있습니다. 추가 Python 패키지는 없습니다(pigpiod 프로토콜·WebSocket을 표준 라이브러리로 구현).
+즉 **"하드웨어 타이밍이 중요한 부분만 Raspberry Pi OS(pigpiod)에서 실행"** 하고, 제어 로직·ROS·SLAM·웹은 모두 Docker 안에 있습니다. pigpiod 프로토콜·WebSocket 은 표준 라이브러리로 구현했고, 라이다 odom 만 **numpy(필수)·scipy(권장)** 를 씁니다 (§4-7).
+
+### 엔코더 없이 위치를 구하는 방법
+SLAM Toolbox 는 `odom → base_link` TF 가 있어야 스캔을 처리합니다. 엔코더 대신 `odometry_node` 가 **연속된 라이다 스캔을 서로 맞춰(Point-to-Line ICP)** 차량 이동량을 구하고 이 TF 를 발행합니다. SLAM Toolbox 는 그 위에서 지도를 만들고 `map → odom` 보정을 합니다 (SLAM Toolbox 자체는 수정하지 않음).
+- 정합에 실패한 스캔은 위치를 갱신하지 않고 `/odom`·TF 도 내지 않습니다 (추정값으로 메우지 않음). 웹 UI 'Odom(라이다)' 표시가 빨강/노랑이 됩니다.
+- **한계**: 벽이 한 방향뿐인 긴 복도, 아무것도 안 보이는 넓은 공간, 유리·검은 물체가 많은 곳에서는 이동량이 부정확하거나 실패합니다(복도형은 `DEGENERATE` 표시). 빠르게 회전하면 스캔 왜곡으로 오차가 커지니 천천히 주행하세요.
+- 라이다 odom 은 **위치와 실측 속도**는 주지만, 바퀴 속도를 직접 재지 못하므로 **속도 PI 제어에는 쓰지 않습니다** (지연·잡음이 커서 모터 제어 루프에 부적합).
 
 **노드 비정상 종료 대비**: pigpiod 는 클라이언트가 죽어도 마지막 PWM 을 계속 출력합니다. 그래서 pigpiod 내부에 **워치독 스크립트**를 올려 300 ms 동안 갱신이 없으면 모터 핀을 LOW(MDD3A 브레이크)로 만듭니다. 정상 종료 시에는 노드가 직접 PWM 0 을 씁니다.
 
@@ -78,7 +85,10 @@ rc_lidar_docker/
 │   └── requirements.txt        numpy, scipy, PyYAML
 └── ros2_ws/src/rc_car/
     ├── launch/bringup.launch.py
-    └── rc_car/ common.py · vehicle_node.py · odometry_node.py · command_manager.py · web_bridge.py · web/index.html
+    ├── rc_car/ common.py · vehicle_node.py · command_manager.py · web_bridge.py · web/index.html
+    │   ├── odometry_node.py    라이다 odom ROS 노드 (/odom, TF, /scan_filtered, /rc/odom_status)
+    │   └── scan_matcher.py     스캔매칭 알고리즘 (ROS 비의존)
+    └── test/test_scan_matcher.py   [Windows/Docker] python ros2_ws/src/rc_car/test/test_scan_matcher.py -v
 ```
 
 ---
@@ -89,7 +99,7 @@ rc_lidar_docker/
 | 항목 | 값 | 출처 |
 |---|---|---|
 | DC 모터 | JGB37-520R30-12, 정격 12 V, 정격 280 rpm, 무부하 320 rpm, 정격 0.36 A, **구속 3.2 A** | 모터 사양표 |
-| 모터 엔코더 | AB 2상 홀, **11 PPR(모터축)**, 엔코더 전원 3.3–5 V, PH2.0-6PIN | 사양표 |
+| 모터 엔코더 (현재 미사용) | AB 2상 홀, **11 PPR(모터축)**, 엔코더 전원 3.3–5 V, PH2.0-6PIN | 사양표 |
 | 감속비 | **1:30** → 바퀴 1회전 = 11×4×30 = **1320 count** | 사양표 (실측 확인 권장) |
 | 모터 드라이버 | Cytron MDD3A: 4–16 V, 3 A 연속 / 5 A 피크(<5 s), 로직 High 1.7–12 V(3.3 V OK), PWM ≤ 20 kHz | MDD3A 데이터시트 |
 | MDD3A 진리표 | A=H,B=L 정방향 · A=L,B=H 역방향 · L,L / H,H 브레이크 | 데이터시트 Table 3 |
@@ -108,18 +118,18 @@ rc_lidar_docker/
 | US-100 사양 (범위/FOV) | 첨부 자료에 없음 → 일반 값으로 두고 '확인 필요' 주석 |
 
 ### ⚠ 배선 전 확인 (GPIO는 3.3 V 전용, 5 V 입력 시 손상)
-- **모터 엔코더 전원을 3.3 V로** (사양 3.3–5 V). 5 V로 쓰면 A/B 출력이 5 V → 레벨 시프터 필요.
+- (엔코더를 다시 연결할 경우) **모터 엔코더 전원을 3.3 V로** (사양 3.3–5 V). 5 V로 쓰면 A/B 출력이 5 V → 레벨 시프터 필요.
 - **MT6701 전원 3.3 V**.
 - **US-100 Trig/Echo 모드**(뒷면 점퍼 제거). 전원을 3.3 V로 하면 Echo도 3.3 V. 5 V로 쓰면 Echo에 분압 저항 필수.
 - 서보는 **별도 6–8.4 V 전원** (구속 최대 3 A — Pi 5 V/MDD3A 5VO(최대 200 mA)로 공급 금지). **모든 GND 공통**.
-- 모터 구속전류 3.2 A > MDD3A 연속 3 A → 바퀴가 막힌 채 출력하지 않도록 (PI 모드는 0.6 s 내 정지 감지).
+- 모터 구속전류 3.2 A > MDD3A 연속 3 A → 바퀴가 막힌 채 출력하지 않도록. **엔코더가 없으므로 구속(stall) 자동 감지가 없습니다** — 바퀴가 막히면 즉시 키를 떼거나 E-STOP.
 
 ### GPIO 사용 (GPIO_Pin.txt) 과 충돌 기능 → **반드시 꺼야 함**
 | GPIO | 용도 | 충돌 | 조치 |
 |---|---|---|---|
-| 14, 15 | 모터1 엔코더B / 모터2 엔코더A | UART·시리얼 콘솔 | `raspi-config` → Interface → Serial: 로그인 셸 **No**, 하드웨어 **No** |
+| 14, 15 | 모터1 엔코더B / 모터2 엔코더A (`use_encoders: false` 면 사용 안 함) | UART·시리얼 콘솔 | 엔코더 사용 시: `raspi-config` → Serial: 로그인 셸 **No**, 하드웨어 **No** |
 | 9, 10 | MT6701 Z / B | SPI0 | `dtparam=spi=off` (또는 해당 줄 삭제) |
-| 4 | 모터1 엔코더A | 1-Wire | `dtoverlay=w1-gpio` 없어야 함 |
+| 4 | 모터1 엔코더A (미사용 시 무관) | 1-Wire | 엔코더 사용 시 `dtoverlay=w1-gpio` 없어야 함 |
 | 13 | 서보 | — | pigpio DMA 서보 펄스 |
 | 16,20 / 21,26 | 모터1 / 모터2 PWM A,B | — | pigpio DMA PWM 1 kHz |
 | 17/27, 22/23, 24/25, 5/6 | 초음파 1–4 trig/echo | — | — |
@@ -174,6 +184,21 @@ nano config/vehicle.yaml            # power.battery_voltage_max: 12.6  (예: 3S 
 ```
 노트북 브라우저에서 **`http://<Pi-IP>:8080`** 접속.
 
+### 4-7. [Docker] 라이다 odom 의존성 확인 (numpy 필수, scipy 권장)
+```bash
+./rc.sh shell
+python3 -c "import numpy, scipy; print('numpy', numpy.__version__, 'scipy', scipy.__version__)"
+```
+- 둘 다 나오면 끝. `./rc.sh logs` 에 `[rc] 경고: python3-numpy 없음` / `알림: python3-scipy 없음` 이 보이면 설치가 필요합니다.
+- numpy 가 없으면 라이다 odom 이 꺼져 **SLAM 위치가 생기지 않습니다.** scipy 가 없으면 동작은 하지만 스캔 1개 처리 시간이 길어집니다(웹 UI '라이다 odom' 줄의 ms 값).
+- 설치는 **이미지에** 넣어야 컨테이너를 다시 만들어도 유지됩니다. 기존 Dockerfile 이 있으면 `apt-get install -y python3-numpy python3-scipy` 줄을 추가해 다시 빌드하는 것이 가장 깔끔합니다. Dockerfile 을 쓰지 않는다면:
+```bash
+# [Pi]
+docker exec -it rc_car bash -c "apt-get update && apt-get install -y python3-numpy python3-scipy"
+docker commit rc_car rc_lidar_docker:latest     # .env 의 RC_IMAGE 와 같은 이름으로
+./rc.sh restart
+```
+
 ---
 
 ## 5. 전원 재공급 후
@@ -196,24 +221,25 @@ nano config/vehicle.yaml            # power.battery_voltage_max: 12.6  (예: 3S 
 각 단계 통과 시 체크하세요. **체크 전에는 해당 기능을 '검증 완료'로 간주하지 마세요.**
 
 1. **pigpiod**: [Pi] `pigs t` 가 숫자 출력. 로그에 `pigpiod vXX 연결`.
-2. **하드웨어만 실행**: `.env` 에 `RC_LAUNCH_ARGS=slam:=false lidar:=false` → `./rc.sh up`. 웹 UI 접속, 상단 '엔코더' 표시 확인.
-3. **엔코더 분해능**: 바퀴를 손으로 정확히 1바퀴 전진 방향으로 돌림 → UI '누적 회전' ≈ **+1.00** (count ≈ 1320).
-   - 음수면 해당 모터 `invert_encoder: true`. 1.00 이 아니면 감속비/PPR 확인 후 `gear_ratio` 수정.
-4. **Open-loop 방향**: UI 'Open-loop PWM' 선택, 최대 PWM 15 %, `W` 짧게 → 두 바퀴 모두 **전진 방향** 회전, 측정 RPM **양수**.
-   - 바퀴가 반대로 돌면 `invert_output: true`. (보통 좌/우 중 한쪽만 바꿔야 함)
-   - **3·4단계를 모두 통과하면** `vehicle.yaml` 의 `motors:` 아래에 `encoders_verified: true` 를 넣고 `./rc.sh restart`.
-     이 값이 false 이거나 줄이 없으면 PI 속도제어, 속도와 `/odom` 발행(→ SLAM 위치), 자동주차가 모두 차단됩니다.
-     (신호가 없는 엔코더가 카운트 0 을 내면 '정지 중'과 구분할 수 없기 때문입니다.)
-5. **워치독**: Open-loop 20 %로 `W` 누른 채 [Pi] `docker kill -s KILL rc_car` → **0.3 s 내 바퀴 정지** 확인. (실패하면 운행 금지, §9 참고) 이후 `./rc.sh up`.
-6. **PI 제어** (`encoders_verified: true` 필요): 'PI 속도제어' 선택, 최대 RPM 60 → `W` → 측정 RPM 이 목표를 따라가는지. 진동하면 `kp`/`ki` 감소, 느리면 증가.
-7. **고장 감지**: PI 모드 주행 중 한쪽 엔코더 커넥터 분리 → `ENCODER_OR_STALL_*` 표시 + 정지 확인. 'E-STOP 해제/고장 리셋' 으로 복구.
+2. **하드웨어만 실행**: `.env` 에 `RC_LAUNCH_ARGS=slam:=false lidar:=false` → `./rc.sh up`. 웹 UI 접속, 'DC 모터' 카드에 '엔코더 미사용' 표시 확인.
+3. **Open-loop 방향**: 최대 PWM 15 %, `W` 짧게 → 두 바퀴 모두 **전진 방향** 회전 (눈으로 확인). 반대로 돌면 해당 모터 `invert_output: true` (보통 좌/우 중 한쪽만).
+4. **워치독**: 최대 PWM 20 %로 `W` 누른 채 [Pi] `docker kill -s KILL rc_car` → **0.3 s 내 바퀴 정지** 확인. (실패하면 운행 금지, §11 참고) 이후 `./rc.sh up`.
+5. **속도 감 익히기**: 엔코더가 없어 PWM % 와 실제 속도의 관계를 모릅니다. 바닥에서 낮은 PWM 부터 올려 보며 실내 주행에 맞는 **최대 PWM** 을 정하고 `speed_control.max_pwm_default` 에 적어 두세요. 실제 속도는 라이다 odom 이 정상일 때 '차량 속도 (라이다 odom)' 로 볼 수 있습니다.
+6. (해당 없음) PI 속도제어·엔코더 고장 감지는 `use_encoders: true` 일 때만 — §6 끝 '엔코더를 다시 쓸 경우' 참고.
+7. **라이다**: `RC_LAUNCH_ARGS=slam:=false` → 상단 '라이다' 초록, 지도 영역에 빨간 스캔 점.
 8. **서보**: `A`/`D` 로 조향. 링크가 걸리지 않는 범위로 `pulse_min_us/max_us`, 직진이 되도록 `center_us` 조정. 바퀴 각도를 각도기로 재서 `us_per_rad` = (펄스 변화 µs) / (바퀴 각도 rad). 끝나면 `calibrated: true`.
 9. **초음파**: 벽에서 30 cm, 100 cm 에 두고 값 비교. `TIMEOUT` 이면 배선/점퍼/전원 확인.
 10. **MT6701**: 연결축을 천천히 360° 이상 돌려 'Z 간격 count' 확인 → `trailer.ppr = Z간격 / 4`. 트레일러를 일직선으로 놓고 '영점 설정'. 왼쪽으로 꺾었을 때 각도가 **+** 가 아니면 `invert: true`.
 11. **치수**: 휠베이스·트랙 실측 → `wheelbase_m`, `track_width_m`, `*_measured: true`.
 12. **라이다 TF**: 뒷차축 중심 기준 라이다 위치 실측 → `lidar.x/y/z/yaw`, `measured: true`. 차량 정면 물체가 UI 지도에서 차량 앞쪽에 보이는지 확인.
-13. **Odometry**: 바닥에서 1 m 직진 → UI 위치/누적거리 ≈ 1 m. 제자리 원 주행 후 yaw 오차 확인 (`yaw_source` steering / wheel_diff 비교).
-14. **SLAM**: `RC_LAUNCH_ARGS=` (기본) → 상단 칩 5개(라이다·엔코더·Odom·SLAM 위치·지도) 모두 초록일 때만 'SLAM 동작 중' 표시. 천천히 주행하며 지도 생성 → '지도 저장'.
+13. **차체·트레일러 제외 영역**: 차를 세워 두고 지도 영역의 스캔 점을 확대해 봅니다. 차체나 트레일러에 맞은 점이 보이면 `lidar.mask_min_range_m` 을 키우거나, 트레일러가 움직이는 각도 범위를 `lidar.mask_sectors_deg` 에 넣습니다 (예: 후방 ±40° → `[[140, -140]]`). 트레일러를 좌우로 끝까지 꺾어 보며 확인하세요. 이 점들이 남아 있으면 라이다 odom 과 지도가 틀어집니다.
+14. **라이다 odom 정지 상태**: 'DC 모터' 카드의 '라이다 odom' 줄이 `OK`, 일치점 수십~수백, 잔차 1 cm 안팎, 처리 시간이 스캔 주기(100 ms)보다 충분히 작은지 확인. 정지 중 '차량 속도'가 0.00 근처여야 합니다.
+15. **라이다 odom 이동**: 바닥에 줄자를 두고 **천천히** 1 m 직진 → 웹 UI 위치(odom 프레임) ≈ 1 m. 제자리에서 차를 손으로 90° 돌려 yaw ≈ 90° 확인. 후진 시 '차량 속도'가 음수인지 확인. '재설정' 횟수가 늘면 정합 실패가 반복된 것 → 속도를 낮추거나 주변에 물체가 보이게 합니다.
+16. **SLAM**: `RC_LAUNCH_ARGS=` (기본) → 상단 칩 4개(라이다·Odom(라이다)·SLAM 위치·지도) 모두 초록일 때만 'SLAM 동작 중' 표시. 천천히 주행하며 지도 생성 → '지도 저장'.
+    - SLAM Toolbox 는 odom 이 `minimum_travel_distance`/`minimum_travel_heading` 만큼 움직여야 스캔을 추가합니다. 기존 `config/slam.yaml` 값이 크고(기본 0.5 m) 공간이 좁으면 지도 갱신이 드물 수 있으니 0.1–0.2 m / 0.1–0.2 rad 정도로 줄여 보세요 (이 프로젝트는 slam.yaml 을 수정하지 않음).
+
+#### 엔코더를 다시 쓸 경우 (`motors.use_encoders: true`)
+엔코더 전원 3.3 V·GPIO 충돌(§3) 확인 후: 바퀴를 손으로 1바퀴 전진 → '누적 회전' ≈ **+1.00** (음수면 `invert_encoder: true`, 1.00 이 아니면 `gear_ratio`). Open-loop 로 전진 시 측정 RPM 양수 확인. 그다음 'PI 속도제어' 에서 `kp`/`ki` 조정, 주행 중 엔코더 커넥터를 분리해 `ENCODER_OR_STALL_*` 정지 확인. 엔코더가 켜져 있어도 위치(odom)는 계속 라이다로 구합니다.
 
 ---
 
@@ -222,9 +248,10 @@ nano config/vehicle.yaml            # power.battery_voltage_max: 12.6  (예: 3S 
 - **지도(가장 큰 영역)**: SLAM 지도 + 차량(파란 사각형, 노란 선=전방, 앞바퀴=명령 조향각) + 라이다 스캔(빨간 점) + 트레일러(보라, 각도 표시용). 휠=확대/축소, 드래그=이동, '차량 추적'.
 - **조종**: `W/↑` 전진 · `S/↓` 후진 · `A/←` `D/→` 조향 · `Space` 정지 · `Esc` 비상정지. 한글 자판(ㅈㄴㅁㅇ)도 인식. 창이 포커스를 잃으면 키 입력 해제.
 - **제어권**: 한 번에 한 브라우저만 조종. 다른 탭은 '보기 전용'. '제어권 가져오기'는 현재 제어자가 2초 이상 명령이 없을 때만 가능. **비상정지는 누구나** 가능.
-- **속도 명령 %**: PI 모드에서는 (최대 RPM 환산 속도)의 %, Open-loop 모드에서는 (최대 PWM)의 %.
-- **슬라이더**: 최대 RPM(≤ 정격 280), 최대 PWM(≤ 하드 상한), 최대 조향(≤ 보정된 한계). 서버가 상한으로 잘라 적용하고 실제 값을 다시 표시. **재부팅 시 config 값으로 복귀** (영구 변경은 `vehicle.yaml`).
-- **PI ↔ Open-loop 전환**: MANUAL·정지 상태에서만. PI 모드에서 엔코더 고장 시 **자동으로 Open-loop로 바뀌지 않고 정지**합니다.
+- **속도 명령 %**: Open-loop 모드에서는 (최대 PWM)의 %. (엔코더 사용 시 PI 모드에서는 최대 RPM 환산 속도의 %)
+- **슬라이더**: 최대 PWM(≤ 하드 상한), 최대 조향(≤ 보정된 한계), 엔코더 사용 시 최대 RPM. 서버가 상한으로 잘라 적용하고 실제 값을 다시 표시. **재부팅 시 config 값으로 복귀** (영구 변경은 `vehicle.yaml`).
+- **PI 속도제어 버튼**: 엔코더 미사용이면 비활성(Open-loop 고정). 엔코더 사용 시 MANUAL·정지 상태에서만 전환, PI 중 엔코더 고장 시 **자동으로 Open-loop로 바뀌지 않고 정지**.
+- **라이다 odom 상태**: 'DC 모터' 카드의 '라이다 odom' 줄 — 상태(`OK`/`DEGENERATE`/`LOST`/`RESET`/`NO_SCAN`), 일치점 수와 비율, 잔차, 처리 시간, 재설정 횟수. 상단 'Odom(라이다)' 칩은 정상=초록, 복도형 퇴화=노랑, 실패=빨강.
 - **통신 끊김**: UI 에 빨간 배너. 차량은 0.5 s 명령 타임아웃(Command Manager) + 0.3 s(차량 제어부) 로 자동 정지. 브라우저 탭 종료 시 즉시 정지.
 - **지도 저장**: `maps/<이름>.pgm/.yaml` (map_server 형식) + `<이름>.posegraph/.data` (SLAM Toolbox 재사용용).
 
@@ -237,17 +264,19 @@ nano config/vehicle.yaml            # power.battery_voltage_max: 12.6  (예: 3S 
 | 키 | 설명 |
 |---|---|
 | `power.battery_voltage_max` | **필수**. PWM 하드 상한 계산 |
-| `motors.left/right` | 핀, `invert_output`, `invert_encoder` |
-| `motors.encoder_ppr / gear_ratio` | 11 / 30 (데이터시트) |
-| `motors.encoders_verified` | 엔코더 실측 확인 후 true (§6-4). false 면 PI·odom·자동주차 차단, Open-loop 만 가능 |
-| `speed_control.kp/ki/kff` | PI 이득. 조건부 적분 Anti-windup |
+| `motors.use_encoders` | **false**(현재): 엔코더 GPIO 미설정, Open-loop PWM 만. true: 엔코더 PI 속도제어 (§6 끝 절차로 확인 후) |
+| `motors.left/right` | 핀, `invert_output`, (`invert_encoder`) |
+| `motors.encoder_ppr / gear_ratio` | 11 / 30 (데이터시트, 엔코더 사용 시) |
+| `speed_control.default_mode` | `OPEN_LOOP` (엔코더 미사용이면 설정과 관계없이 Open-loop) |
+| `speed_control.kp/ki/kff` | PI 이득. 조건부 적분 Anti-windup (엔코더 사용 시) |
 | `speed_control.rpm_accel_limit / pwm_slew_per_s` | 급격한 출력 변화 제한 |
 | `speed_control.stall_* / reverse_*` | 엔코더 고장·구속 / 방향 불일치(폭주 방지) 감지 |
 | `steering.*` | 펄스 범위·중심·환산계수 |
 | `trailer.ppr / invert` | MT6701 |
 | `ultrasonic.*` | 측정 주기·타임아웃·센서 목록 |
-| `lidar.*` | 포트, base_link→laser TF |
-| `odometry.yaw_source` | `steering` (v·tanδ/L) 또는 `wheel_diff` ((vR−vL)/트랙) |
+| `lidar.*` | 포트, base_link→laser TF (**라이다 odom 정확도에 직접 영향 → 실측 필수**) |
+| `lidar.mask_min_range_m / mask_sectors_deg` | 차체·트레일러에 맞은 점 제외 (§6-13). 라이다 odom 과 SLAM(`/scan_filtered`) 모두 적용 |
+| `odometry.*` | 라이다 스캔매칭 파라미터: 정합 거리·반복·최소 일치점·잔차 상한·키프레임·퇴화 판정 등 (파일 주석 참고) |
 | `safety.*` | 명령 타임아웃, 모드 전환 정지 판정 |
 | `autopark.enabled` | 알고리즘 준비 전까지 **false** |
 | `web.port / allowed_networks` | 접속 허용 사설망 대역 |
@@ -259,14 +288,16 @@ nano config/vehicle.yaml            # power.battery_voltage_max: 12.6  (예: 3S 
 | 토픽 | 타입 | 발행 | 내용 |
 |---|---|---|---|
 | `/scan` | LaserScan | sllidar | frame `laser` |
-| `/odom` | Odometry | odometry_node | odom→base_link, 엔코더 정상일 때만 |
+| `/scan_filtered` | LaserScan | odometry_node | 차체·트레일러 제외 빔 = +inf. **SLAM Toolbox 입력** |
+| `/odom` | Odometry | odometry_node | 라이다 스캔매칭 odom→base_link (스캔 시각), 정합 성공 시에만. twist.linear.x = 실측 전진 속도(후진 음수) |
+| `/rc/odom_status` | String(JSON) | odometry_node | 5 Hz: status, ok, matches, inlier_ratio, rms_m, degenerate, proc_ms, resets, v |
 | `/tf` | | odometry_node, slam_toolbox | `map → odom → base_link → laser`, `base_link → ultrasonic_*` (static) |
 | `/map` | OccupancyGrid | slam_toolbox | |
-| `/joint_states` | JointState | vehicle_node | `rear_left_wheel`, `rear_right_wheel` (위치 rad, 속도 rad/s, effort=PWM duty), `trailer_joint` |
+| `/joint_states` | JointState | vehicle_node | `trailer_joint`. 엔코더 사용 시 `rear_left_wheel`, `rear_right_wheel` (위치 rad, 속도 rad/s, effort=PWM duty) |
 | `/trailer/angle` | Float64 | vehicle_node | MT6701 트레일러 상대각 rad (+ = 반시계) |
 | `/steering/angle_cmd` | Float64 | vehicle_node | **명령** 조향각 rad (측정값 아님) |
 | `/ultrasonic/us1..us4` | Range | vehicle_node | m, 실패 NaN / 범위초과 +inf / 근접 −inf |
-| `/rc/vehicle_status` | String(JSON) | vehicle_node | 모터 목표/측정 RPM·PWM·누적회전·거리, 조향, 트레일러, 초음파, 고장 |
+| `/rc/vehicle_status` | String(JSON) | vehicle_node | PWM, `encoders_used`, (엔코더 사용 시 RPM·누적회전·거리), 조향, 트레일러, 초음파, 고장 |
 | `/rc/control_state` | String(JSON) | command_manager | 모드, 제어권, E-STOP, 자동주차 차단 사유 |
 | `/rc/drive_cmd` | String(JSON) | command_manager | 최종 명령 (vehicle_node 만 구독) |
 
@@ -283,7 +314,7 @@ base_link 원점 = **뒷차축 중심(지면)**, +x 전방, +y 좌측, 조향각
 |---|---|---|
 | `hello` | `role`: `ui`\|`autopark`, `name`, `ready` | 최초 1회 |
 | `ping` | `t`, `ready`(autopark) | 하트비트 |
-| `drive` | `v` [m/s], `steer` [rad] | PI 모드 / AUTO_PARK (공통 차량 제어 인터페이스) |
+| `drive` | `v` [m/s], `steer` [rad] | PI 모드 / AUTO_PARK (공통 차량 제어 인터페이스, 엔코더 필요) |
 | `drive` | `throttle` [−1..1], `steer` | Open-loop (MANUAL UI 전용) |
 | `stop` / `estop` / `estop_reset` | | 정지 / 비상정지(래치) / 해제·고장 리셋(UI만) |
 | `mode` | `mode`: `MANUAL`\|`AUTO_PARK` | 전환 요청 (정지 확인 후 전환) |
@@ -292,7 +323,7 @@ base_link 원점 = **뒷차축 중심(지면)**, +x 전방, +y 좌측, 조향각
 | `set_limits` | `max_rpm`, `max_pwm`(0–1), `max_steer_rad` | |
 | `trailer_zero` / `save_map` | `name` | |
 
-**서버 → 클라이언트**: `welcome`(id, config 요약) · `state`(10 Hz: `vehicle`(`stamp` 포함), `control`, `pose`{frame,x,y,yaw,`age_s`}, `odom`{x,y,yaw,v,w}, `slam`, `park`(자동주차 상태 중계), `you`) · `map`(int8 → zlib → base64, 갱신 시) · `scan`(5 Hz, 지도 좌표 점) · `park_paths` · `reply` · `pong`.
+**서버 → 클라이언트**: `welcome`(id, config 요약) · `state`(10 Hz: `vehicle`(`stamp` 포함), `control`, `pose`{frame,x,y,yaw,`age_s`}, `odom`{x,y,yaw,v,w}, `slam`(`odom_status` 포함), `park`(자동주차 상태 중계), `you`) · `map`(int8 → zlib → base64, 갱신 시) · `scan`(5 Hz, 지도 좌표 점) · `park_paths` · `reply` · `pong`.
 
 **자동주차 중계 메시지** (브리지는 전달만 함, 알고리즘은 노트북):
 | type | 방향 | 내용 |
@@ -308,15 +339,19 @@ base_link 원점 = **뒷차축 중심(지면)**, +x 전방, +y 좌측, 조향각
 | 증상 | 확인 |
 |---|---|
 | UI 'pigpiod 연결 안 됨' | [Pi] `systemctl status rc-pigpiod`, `pigs t`. pigpiod 는 Pi 4 전용(Pi 5 미지원) |
-| `WATCHDOG_SCRIPT_FAILED` | 로그의 pigpio 오류코드 확인. 임시로 `pigpio.watchdog_script: false` 가능하나 **§6-5 워치독 대체 수단 없이 운행 금지** |
+| `WATCHDOG_SCRIPT_FAILED` | 로그의 pigpio 오류코드 확인. 임시로 `pigpio.watchdog_script: false` 가능하나 **§6-4 워치독 대체 수단 없이 운행 금지** |
 | `MOTORS_DISABLED` | `battery_voltage_max` 미설정/범위 밖 |
-| 엔코더 count 안 변함 | 엔코더 전원(3.3 V), GND 공통, `./rc.sh check` 의 UART/1-Wire 충돌 |
-| `enc_errors` 증가 | 엣지 누락(노이즈/배선). 엔코더 선 짧게, 풀업 확인 |
-| `DIRECTION_MISMATCH_*` | `invert_output`/`invert_encoder` 설정 (§6-3, 6-4) |
+| (엔코더 사용 시) count 안 변함 / `enc_errors` 증가 / `DIRECTION_MISMATCH_*` | 엔코더 전원 3.3 V·GND 공통·UART/1-Wire 충돌 / 노이즈·배선 / `invert_output`·`invert_encoder` |
+| 라이다 odom `NO_SCAN` | `/scan` 이 안 들어옴 → 아래 `/scan` 없음 항목 |
+| 라이다 odom `NO_NUMPY` | 컨테이너에 numpy 없음 → §4-7 |
+| 라이다 odom `LOST` (`TOO_FEW_MATCHES`, `LOW_OVERLAP`, `HIGH_RESIDUAL`, `JUMP`) | 너무 빠름(특히 회전) → 천천히. 주변에 보이는 물체가 적음. 차체·트레일러 점이 섞임(§6-13). `lidar.yaw` 등 장착값 오류 |
+| 라이다 odom `DEGENERATE` | 긴 복도처럼 한 방향 벽만 보임 → 진행 방향 이동량을 못 잼. 옆에 물체를 두거나 다른 경로로 |
+| '재설정' 횟수 증가 | 연속 실패 후 키프레임을 다시 잡음 → odom 위치가 튀었을 수 있음. SLAM 이 지도와 맞춰 보정하지만, 크게 튀면 지도가 깨질 수 있으니 천천히 다시 주행 |
+| 라이다 odom 처리 시간(ms)이 100 에 가까움 | scipy 설치(§4-7), `odometry.max_points` 줄이기·`voxel_m` 키우기 |
 | 초음파 `TIMEOUT` | US-100 점퍼 제거(Trig/Echo 모드), Echo 전압, 핀 |
 | MT6701 값 이상 | SPI 꺼짐 확인(GPIO9/10), 전원 3.3 V, ABZ 출력 모드 |
 | `/scan` 없음 | [Pi] `ls /dev/ttyUSB*`, `vehicle.yaml` `lidar.serial_port`. sllidar 런치 인자명이 다르면 `bringup.launch.py` 의 `serial_port/frame_id` 수정 |
-| SLAM 칩 'SLAM 위치' 빨강 | `/odom` 정상인지, `ros2 run tf2_ros tf2_echo map base_link` [Docker] |
+| SLAM 칩 'SLAM 위치' 빨강 | 'Odom(라이다)' 정상인지, `ros2 run tf2_ros tf2_echo map base_link` [Docker], slam_toolbox 가 `/scan_filtered` 를 받는지 `ros2 topic hz /scan_filtered` |
 | slam_toolbox 실행 안 됨 | [Docker] `ls /opt/ros/jazzy/share/slam_toolbox/launch` 에 `online_async_launch.py` 존재 확인. 병합 파라미터: `/tmp/rc_slam_merged.yaml` |
 | 웹 접속 안 됨 | 같은 Wi-Fi인지, `allowed_networks` 에 노트북 IP 대역 포함, Pi 방화벽 |
 | 지도 표시 안 됨 | 오래된 브라우저(DecompressionStream 필요: Chrome 80+, Safari 16.4+, Firefox 113+) |
@@ -326,6 +361,7 @@ base_link 원점 = **뒷차축 중심(지면)**, +x 전방, +y 좌측, 조향각
 ```bash
 ros2 topic hz /scan
 ros2 topic echo /rc/vehicle_status --once
+ros2 topic echo /rc/odom_status            # 라이다 odom 품질
 ros2 topic echo /trailer/angle
 ros2 run tf2_ros tf2_echo odom base_link
 ros2 node list
@@ -336,22 +372,21 @@ ros2 node list
 ## 12. 트레일러 후진 자동주차 (노트북)
 
 ### 12-1. 현재 상태 — 먼저 읽기
-- **DC 모터 엔코더 데이터가 들어오지 않습니다.** 그 결과로 아래 기능을 쓸 수 없습니다.
-  - `motors.encoders_verified` 가 true 가 아니면 엔코더 odom(`/odom`, `odom→base_link` TF)과 차량 속도를 발행하지 않습니다.
-  - SLAM Toolbox 는 odom TF 가 있어야 스캔을 처리합니다. 그래서 **SLAM 지도와 위치(map→base_link)도 생기지 않습니다.**
-  - 실제 차량 속도 피드백이 없습니다.
-- 위치나 속도를 다른 값으로 **추정하거나 만들어내지 않습니다.** 그래서 **실제 AUTO_PARK 구동은 지금 차단됩니다.**
-- 지금 할 수 있는 일은 **경로 계획과 알고리즘 검증**입니다. 저장된 지도나 웹 UI 에서 지정한 검증용 시작자세를 쓰며, 이렇게 만든 경로는 실제로 구동할 수 없습니다.
+- **DC 모터 엔코더를 쓰지 않기로 했습니다.** 위치와 속도는 라이다로만 구합니다.
+  - 위치: 라이다 odom(스캔매칭) → SLAM Toolbox → `map→base_link`. 하드웨어에서 §6-13~16 을 통과하면 쓸 수 있습니다.
+  - 속도 **측정**: 라이다 odom 의 속도(`/odom` twist). 전환점 정지 판정과 추종 오차 계산에 씁니다.
+  - 속도 **제어**: 불가. 차량 제어부는 엔코더가 있어야 목표 속도(m/s)를 따라가는 PI 를 돌릴 수 있고, 없으면 PWM 만 냅니다.
+- 자동주차의 Tracking MPC 는 **목표 속도(m/s)** 를 내보냅니다. 이 명령을 실행할 속도 제어 수단이 없으므로 **실제 AUTO_PARK 구동은 계속 차단됩니다** (Command Manager·노트북 양쪽에서 `speed_control` 항목으로 표시).
+- 지금 할 수 있는 일: 라이다 odom·SLAM 검증, 실제 위치에서 **경로 계획과 검증**. 구동은 속도 제어 방식을 정한 뒤입니다 (예: 라이다 odom 속도를 쓰는 저속 속도 루프를 따로 검증해 추가, 또는 엔코더 복구).
 
 | 피드백 | 출처 | 지금 | 자동주차에 필요 |
 |---|---|---|---|
-| 위치 x, y, 방향 yaw | SLAM `map→base_link` (엔코더 odom 이 있어야 동작) | ❌ | 필수 |
-| 차량 속도 | DC 모터 엔코더 | ❌ (고장) | 필수 (전환점 정지 판정, 속도 확인) |
-| 트레일러 연결각 β | MT6701 (엔코더와 무관) | `trailer.ppr` 설정 후 가능 | 필수 |
+| 위치 x, y, 방향 yaw | SLAM `map→base_link` (라이다 odom 위에서 동작) | 하드웨어 검증 후 가능 | 필수 |
+| 차량 속도 측정 | 라이다 odom (`DEGENERATE` 아닐 때) | 하드웨어 검증 후 가능 | 필수 (전환점 정지 판정) |
+| 차량 속도 제어 (m/s 추종) | 엔코더 PI | ❌ (엔코더 미사용) | 필수 → **현재 구동 차단 사유** |
+| 트레일러 연결각 β | MT6701 | `trailer.ppr` 설정 후 가능 | 필수 |
 | 조향각 | 서보 **명령값** (측정 피드백 없음) | 미보정 | 보정 필수 |
 | 초음파 | US-100 | 가능 | 근접 시 정지에 사용 (필수는 아님) |
-
-> 참고: 라이다만으로 odom 을 만드는 패키지(예: laser scan matcher 계열)를 추가하면 SLAM 위치는 엔코더 없이도 얻을 수 있습니다. 하지만 속도 피드백은 여전히 없습니다. 이 프로젝트는 SLAM Toolbox 를 수정하거나 재구현하지 않으므로, 이 방법은 넣지 않았습니다.
 
 ### 12-2. 알고리즘 구조
 ```
@@ -370,7 +405,7 @@ ros2 node list
   ③ Tracking MPC  20 Hz. 기준 궤적 주변의 선형 시변 모델 + 경계 제약 최소자승(lsq_linear)
                   · 상태오차 [x, y, θ, β] 를 줄이도록 목표 조향각(rad) 계산, 목표 속도(m/s) 는 속도 프로파일 + 오차에 따른 감속
                   · 연결각 한계 / 초음파 근접 → 정지,  경로 이탈 → 재계획(최대 max_replans 회) → 넘으면 정지
-                  · 전환점: 실제 정지(엔코더 속도) 확인 후 다음 구간,  마지막 구간: 자세 오차가 허용치 이내면 PARKED
+                  · 전환점: 실제 정지(라이다 odom 실측 속도) 확인 후 다음 구간,  마지막 구간: 자세 오차가 허용치 이내면 PARKED
   출력: drive {v, steer} → Pi Command Manager → 공통 차량 제어부  (알고리즘이 PWM 을 직접 다루지 않음)
 ```
 목표 자세는 **트레일러 차축 중심의 위치와 방향**이며, 연결각 0(일직선)을 목표로 합니다. 웹 UI 에서는 지도 위를 누른 위치가 트레일러 차축이고, **트레일러가 향할 방향(견인차가 있을 쪽)으로 드래그**합니다.
@@ -379,14 +414,15 @@ ros2 node list
 다음 **모든 조건**을 만족할 때만 노트북이 `ready=true` 와 `mode: AUTO_PARK` 를 보냅니다.
 1. Pi `config/vehicle.yaml` 의 `autopark.enabled: true`. **하드웨어 검증 전까지 false 를 유지하세요.**
 2. SLAM 위치가 map 프레임이고, 나이가 0.5 s 이하
-3. 엔코더 속도가 유효함 (`encoders_ok`)
-4. MT6701 연결각이 유효함
-5. 조향이 보정됨 (`steering.calibrated: true`)
-6. E-STOP 이 걸려 있지 않음
-7. 검증용 시작자세가 아니라 현재 실제 위치에서 계획한 경로
-8. 계획 이후 차량이 움직이지 않았음
+3. 실측 속도가 유효함 (라이다 odom `OK`, 퇴화 아님)
+4. 차량 속도 폐루프 제어 가능 (`speed_control` — 엔코더 PI 필요, **현재 불충족**)
+5. MT6701 연결각이 유효함
+6. 조향이 보정됨 (`steering.calibrated: true`)
+7. E-STOP 이 걸려 있지 않음
+8. 검증용 시작자세가 아니라 현재 실제 위치에서 계획한 경로
+9. 계획 이후 차량이 움직이지 않았음
 
-Command Manager 도 별도로 검사합니다. 엔코더, odom, SLAM 위치, 트레일러각 중 하나라도 끊기면 **정지한 뒤 MANUAL 로 복귀**하며, Open-loop 로 전환하지 않습니다. 그 밖의 정지 조건은 다음과 같습니다.
+Command Manager 도 별도로 검사합니다. 라이다 odom, SLAM 위치, 트레일러각, 속도 제어 중 하나라도 끊기면 **정지한 뒤 MANUAL 로 복귀**하며, Open-loop 로 전환하지 않습니다. 그 밖의 정지 조건은 다음과 같습니다.
 - 노트북 프로그램이 끊기거나 명령이 0.5 s 이상 오지 않으면 차량이 정지합니다.
 - 웹 UI 의 '자동주차 중지' 는 노트북이 끊겨 있어도 Pi 에 직접 stop 과 MANUAL 을 요청합니다.
 - E-STOP 은 언제나 사용할 수 있습니다.
@@ -398,7 +434,7 @@ python -m pip install -r autopark\requirements.txt     # numpy, scipy, PyYAML
 python -m unittest autopark.test_autopark -v           # 단위 테스트 (약 5초)
 python -m autopark run <Pi-IP>                         # 자동주차 클라이언트 실행 (Ctrl+C 종료)
 ```
-Pi 쪽에서는 `web_bridge.py`, `command_manager.py`, `web/index.html` 이 바뀌었습니다. 이 파일들을 다시 복사한 뒤 [Pi] `./rc.sh restart` 를 실행하세요. 웹 UI 가 바뀌지 않으면 `./rc.sh rebuild` 를 실행합니다.
+Pi 쪽 파일을 바꾼 뒤에는 [Pi] `./rc.sh restart`, 새 파일이 생겼거나 웹 UI 가 바뀌지 않으면 `./rc.sh rebuild` 를 실행합니다.
 
 **웹 UI 사용 순서** ('자동주차' 카드):
 1. 카드 제목 옆에 '노트북 연결됨' 이 보이는지 확인합니다.
@@ -438,14 +474,14 @@ python -m autopark plan --empty 5x3 --start 3.5 1.5 0 0 --goal 1.6 1.5 0      # 
 | `planning_mpc.*` | 가중치, 이산화, 구간 연결 허용오차 |
 | `speed.*` | 운용 속도 정책 (전진 0.15 / 후진 0.08 m/s 등). 데이터시트 값이 아니므로 하드웨어 검증 후 조정 |
 | `tracking_mpc.*` | 예측 지평, 가중치, 이탈·도착 허용오차, 재계획 횟수, 초음파 정지 거리 |
-| `feedback.*` | 구동 허용 조건 (데이터 나이, 엔코더 속도 필수, 조향 보정 필수) |
+| `feedback.*` | 구동 허용 조건 (데이터 나이, 실측 속도 필수 `require_speed_feedback`, 조향 보정 필수) |
 
 치수 측정 방법: 차량과 트레일러를 일직선으로 두고 줄자로 잽니다. MT6701 영점(§6-10)을 맞춘 뒤 트레일러를 왼쪽으로 꺾었을 때 `/trailer/angle` 이 + 인지 확인하세요. 부호가 이 모델과 같아야 합니다(β = 트레일러 방향 − 차량 방향).
 
 ### 12-7. 실제 RC카 적용 순서
-1. **엔코더 복구** (§6-1~4, 엔코더 진단 절차). 바퀴 1회전 ≈ +1.00 을 확인한 뒤 `encoders_verified: true` 로 바꿉니다. 웹 UI 의 '엔코더' 표시가 초록이어야 합니다.
-2. PI 속도 제어 확인 (§6-6), 조향 보정 (§6-8), MT6701 `ppr` 과 영점 설정 (§6-10)
-3. odom 1 m 직진 오차 확인 → SLAM 위치 안정성 확인 (상단 칩 5개 모두 초록)
+1. **속도 제어 방식 결정** (§12-1). 이것이 정해지기 전에는 7단계 이후로 넘어갈 수 없습니다.
+2. 조향 보정 (§6-8), MT6701 `ppr` 과 영점 설정 (§6-10)
+3. 라이다 odom 1 m 직진 오차 확인 (§6-15) → SLAM 위치 안정성 확인 (상단 칩 4개 모두 초록)
 4. `autopark/config.yaml` 에 트레일러 치수 입력 → `python -m unittest autopark.test_autopark`
 5. 저장 지도로 오프라인 계획 검증 (§12-5)
 6. 실제 위치로 '경로 계획' 만 실행해 경로가 지도와 맞는지 확인합니다. 아직 구동하지 않습니다.
@@ -459,7 +495,8 @@ python -m autopark plan --empty 5x3 --start 3.5 1.5 0 0 --goal 1.6 1.5 0      # 
 | Hybrid A*: 직선 후진, 직각 주차칸(왼쪽·오른쪽 접근), 평행 포켓, 실패 사유 코드 | ✅ 테스트 지도. 평행 포켓에서는 Planning MPC 가 거부되고 A* 경로를 사용함 (목표 오차 약 9 cm, A* 허용치 이내) |
 | Planning MPC: 충돌·연결각·조향·조향변화율 제약, 최종 자세 일치, 속도 프로파일 | ✅ 테스트 지도 |
 | Tracking MPC: 선형화 정확도, 기준 위 추종, 조향 변화율 제한, 연결각·초음파 정지, 이탈 재계획, 주차 완료 판정 | ✅ 단위 테스트 (폐루프 주행 시뮬레이션은 하지 않음) |
-| 노트북 ↔ 브리지 메시지 흐름, 엔코더 고장 시 구동 차단 (drive/AUTO_PARK 요청 없음) | ✅ 대체 서버로 확인 |
+| 노트북 ↔ 브리지 메시지 흐름, 피드백 부족 시 구동 차단 (drive/AUTO_PARK 요청 없음) | ✅ 대체 서버로 확인 |
+| 라이다 odom 속도를 피드백으로 받기, 속도 제어 수단 없을 때 구동 차단 | ✅ 단위 테스트 (`TestFeedback`) |
 | 실제 차량 추종 성능, 트레일러 실제 치수 반영, 웹 UI 지도 조작 | ⛔ **미검증** |
 
 테스트에 쓴 치수(트레일러 L2=0.25 m 등)는 `test_autopark.py` 안에서만 쓰는 가정값이며, `config.yaml` 에는 넣지 않았습니다.

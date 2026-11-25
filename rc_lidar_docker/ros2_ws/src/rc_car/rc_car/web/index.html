@@ -78,8 +78,8 @@ kbd{background:var(--bg);border:1px solid var(--line);border-bottom-width:2px;bo
   <span class="chip" id="chipMode">모드 —</span>
   <span class="chip" id="chipOwner">제어권 —</span>
   <span class="chip"><span class="dot" id="dLidar"></span>라이다</span>
-  <span class="chip"><span class="dot" id="dEnc"></span>엔코더</span>
-  <span class="chip"><span class="dot" id="dOdom"></span>Odom</span>
+  <span class="chip" id="chipEnc" style="display:none"><span class="dot" id="dEnc"></span>엔코더</span>
+  <span class="chip" id="chipOdom" title="라이다 스캔매칭 odom"><span class="dot" id="dOdom"></span>Odom(라이다)</span>
   <span class="chip"><span class="dot" id="dTf"></span>SLAM 위치</span>
   <span class="chip"><span class="dot" id="dMap"></span>지도</span>
   <span class="chip" id="chipSlam">SLAM 준비 안 됨</span>
@@ -109,7 +109,7 @@ kbd{background:var(--bg);border:1px solid var(--line);border-bottom-width:2px;bo
         <button id="btnOL">Open-loop PWM</button>
       </div>
       <div class="slider"><span>속도 명령</span><input type="range" id="sSpeed" min="5" max="100" value="40"><output id="oSpeed"></output></div>
-      <div class="slider"><span>최대 RPM</span><input type="range" id="sRpm" min="0" max="280" value="100"><output id="oRpm"></output></div>
+      <div class="slider" id="rowRpm"><span>최대 RPM</span><input type="range" id="sRpm" min="0" max="280" value="100"><output id="oRpm"></output></div>
       <div class="slider"><span>최대 PWM</span><input type="range" id="sPwm" min="0" max="100" value="35"><output id="oPwm"></output></div>
       <div class="slider"><span>최대 조향</span><input type="range" id="sSteer" min="0" max="100" value="100"><output id="oSteer"></output></div>
       <div class="muted" style="margin-top:6px">
@@ -121,7 +121,7 @@ kbd{background:var(--bg);border:1px solid var(--line);border-bottom-width:2px;bo
     </div>
 
     <div class="card">
-      <h2>DC 모터 (엔코더) <span id="encRate" class="muted"></span></h2>
+      <h2>DC 모터 <span id="encRate" class="muted"></span></h2>
       <table>
         <tr><th></th><th>왼쪽</th><th>오른쪽</th></tr>
         <tr><td>목표 RPM</td><td id="mL_t">—</td><td id="mR_t">—</td></tr>
@@ -137,6 +137,7 @@ kbd{background:var(--bg);border:1px solid var(--line);border-bottom-width:2px;bo
       </div>
       <div class="kv" style="margin-top:8px">
         <span>차량 속도</span><span id="vSpeed">—</span>
+        <span>라이다 odom</span><span id="vOdomQ">—</span>
         <span>누적 주행거리</span><span id="vOdo">—</span>
         <span>PWM 하드 상한</span><span id="vHard">—</span>
       </div>
@@ -323,7 +324,7 @@ $('btnClaim').onclick = () => send({type: 'claim', force: true});
 $('btnRelease').onclick = () => send({type: 'release'});
 $('btnPI').onclick = () => send({type: 'set_control_mode', control_mode: 'PI'});
 $('btnOL').onclick = () => {
-  if (confirm('Open-loop PWM 모드: 엔코더 피드백 없이 PWM 을 직접 출력합니다. 전환할까요?'))
+  if (confirm('Open-loop PWM 모드: 속도 피드백 없이 PWM 을 직접 출력합니다. 전환할까요?'))
     send({type: 'set_control_mode', control_mode: 'OPEN_LOOP'});
 };
 $('btnManual').onclick = () => send({type: 'mode', mode: 'MANUAL'});
@@ -361,7 +362,12 @@ function render() {
   dot('dWs', true);
   $('tWs').textContent = `연결됨 ${rtt !== null ? Math.round(rtt) + 'ms' : ''}`;
   dot('dLidar', s.lidar_ok); dot('dOdom', s.odom_ok); dot('dTf', s.map_tf_ok); dot('dMap', s.map_received);
+  const encUsed = !!(v && v.encoders_used);
+  $('chipEnc').style.display = encUsed ? '' : 'none';
   dot('dEnc', v ? v.encoders_ok : false);
+  const os = s.odom_status;
+  if (os && os.status === 'DEGENERATE') dot('dOdom', 'warn');
+  $('chipOdom').title = os ? `라이다 odom: ${os.status}${os.reason ? ' (' + os.reason + ')' : ''}` : '라이다 odom 상태 없음';
   $('chipSlam').innerHTML = s.ready ? '<span class="ok">● SLAM 동작 중</span>' : '<span class="warn">SLAM 준비 안 됨</span>';
 
   // 모드/제어권
@@ -370,6 +376,9 @@ function render() {
   $('chipOwner').textContent = c.owner ? (st.you.owner ? '제어권: 이 브라우저' : `제어권: ${c.owner}`) : '제어권: 없음';
   $('ownTag').textContent = st.you.owner ? '제어 중' : (c.owner ? '보기 전용' : '키 입력 시 제어권 획득');
   $('btnPI').classList.toggle('on', c.control_mode === 'PI');
+  $('btnPI').disabled = !encUsed;
+  $('btnPI').title = encUsed ? '' : 'DC 모터 엔코더 미사용 → PI 속도제어 불가';
+  $('rowRpm').style.display = encUsed ? '' : 'none';
   $('btnOL').classList.toggle('on', c.control_mode === 'OPEN_LOOP');
   $('btnManual').classList.toggle('on', c.mode === 'MANUAL');
   $('btnAuto').classList.toggle('on', c.mode === 'AUTO_PARK');
@@ -390,7 +399,8 @@ function render() {
   if (!v) return;
   const set = v.settings;
   $('hwMode').textContent = `${v.active_mode}${v.stop_reason ? ' (' + v.stop_reason + ')' : ''}`;
-  $('encRate').textContent = `엣지 ${v.edge_rate_hz}/s · ${v.counts_per_rev} cnt/rev`;
+  $('encRate').textContent = encUsed ? `엔코더 · 엣지 ${v.edge_rate_hz}/s · ${v.counts_per_rev} cnt/rev`
+    : '엔코더 미사용 (PWM 출력만 표시)';
   // 슬라이더 동기화
   if (now - sliderTouchedAt > 1500) {
     $('sRpm').max = v.rated_rpm; $('sRpm').value = set.max_rpm; $('oRpm').textContent = Math.round(set.max_rpm);
@@ -405,7 +415,7 @@ function render() {
     $(p + '_t').textContent = fmt(m.target_rpm, 1);
     $(p + '_m').textContent = fmt(m.measured_rpm, 1);
     $(p + '_p').textContent = fmt(m.pwm * 100, 1, '%');
-    $(p + '_d').textContent = m.direction;
+    $(p + '_d').textContent = m.direction ?? '—';
     $(p + '_r').textContent = fmt(m.revolutions, 2);
     $(p + '_x').textContent = fmt(m.distance_m, 3, ' m');
   }
@@ -413,8 +423,16 @@ function render() {
     const w = Math.min(50, Math.abs(m.pwm) * 50);
     const el = $(id); el.style.width = w + '%'; el.style.left = m.pwm >= 0 ? '50%' : (50 - w) + '%';
   }
-  $('vSpeed').textContent = fmt(v.speed_m_s, 3, ' m/s');
-  $('vOdo').textContent = fmt(v.odometer_m, 2, ' m') + ` (순 ${fmt(v.net_distance_m, 2, ' m')})`;
+  $('vSpeed').textContent = encUsed ? fmt(v.speed_m_s, 3, ' m/s') + ' (엔코더)'
+    : (st.odom && s.odom_ok ? fmt(st.odom.v, 3, ' m/s') + ' (라이다 odom)' : '— (라이다 odom 없음)');
+  $('vOdomQ').innerHTML = !os ? '<span class="warn">상태 없음</span>'
+    : `<span class="${os.ok ? (os.status === 'DEGENERATE' ? 'warn' : 'ok') : 'bad'}">${os.status}</span>`
+      + (os.reason ? ` ${os.reason}` : '')
+      + (os.matches !== undefined ? ` · 일치 ${os.matches}점 (${fmt((os.inlier_ratio || 0) * 100, 0, '%')})` : '')
+      + (os.rms_m != null ? ` · 잔차 ${fmt(os.rms_m * 100, 1, ' cm')}` : '')
+      + (os.proc_ms != null ? ` · ${fmt(os.proc_ms, 0, ' ms')}` : '')
+      + (os.resets ? ` · <span class="warn">재설정 ${os.resets}회</span>` : '');
+  $('vOdo').textContent = encUsed ? fmt(v.odometer_m, 2, ' m') + ` (순 ${fmt(v.net_distance_m, 2, ' m')})` : '— (엔코더 미사용)';
   $('vHard').textContent = v.motors_enabled ? fmt(v.hard_max_pwm * 100, 0, '%') : `<비활성> ${v.motors_disabled_reason || ''}`;
   const sg = v.steering;
   $('stT').textContent = fmt(deg(sg.target_rad), 1, '°');
@@ -441,6 +459,8 @@ function render() {
   for (const f of v.faults) items.push(`<div class="bad">● ${f}</div>`);
   for (const w of v.warnings) items.push(`<div class="warn">▲ ${w}</div>`);
   if (v.motors_disabled_reason) items.push(`<div class="bad">${v.motors_disabled_reason}</div>`);
+  if (os && !os.ok) items.push(`<div class="warn">▲ 라이다 odom ${os.status}${os.reason ? ': ' + os.reason : ''} — 위치 갱신 중단</div>`);
+  else if (os && os.status === 'DEGENERATE') items.push('<div class="warn">▲ 라이다 odom 퇴화(복도형 환경) — 진행 방향 이동량 부정확</div>');
   if (v.calibration_pending.length) items.push(`<div class="warn">미보정: ${v.calibration_pending.join(', ')}</div>`);
   $('faults').innerHTML = items.join('') || '<span class="ok">없음</span>';
   const ev = [...(c.events || []), ...localEvents].sort((a, b) => b.t - a.t).slice(0, 14);

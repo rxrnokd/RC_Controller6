@@ -1,4 +1,4 @@
-"""③ Tracking MPC — 실제 피드백(SLAM 위치·방향, 엔코더 속도, MT6701 연결각)으로 기준 궤적 추종.
+"""③ Tracking MPC — 실제 피드백(SLAM 위치·방향, 실측 속도(라이다 odom), MT6701 연결각)으로 기준 궤적 추종.
 
 선형 시변(LTV) MPC: 기준 궤적 주변에서 RK4 이산 모델을 수치 선형화
    e_{k+1} = A_k e_k + B_k u_k,   e = x - x_ref,  u = δ - δ_ref
@@ -130,7 +130,7 @@ class TrackingMPC:
 
     # ------------------------------------------------------------------ 1 제어 주기
     def step(self, fb):
-        """fb: {'x','y','th','beta','v'(엔코더, m/s), 'us_min'(m 또는 None)} — 모두 실제 측정값이어야 함."""
+        """fb: {'x','y','th','beta','v'(실측 m/s: 라이다 odom 또는 엔코더), 'us_min'(m 또는 None)} — 모두 실제 측정값이어야 함."""
         c, g, tr = self.c, self.g, self.traj
         s = (fb['x'], fb['y'], fb['th'], fb['beta'])
         if abs(s[3]) > g.hitch_max:

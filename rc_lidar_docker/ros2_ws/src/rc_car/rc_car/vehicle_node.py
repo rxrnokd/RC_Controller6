@@ -3,7 +3,7 @@
   입력  /rc/drive_cmd   (std_msgs/String JSON, Command Manager 가 20 Hz 발행 — 최종 명령)
         /rc/settings    (std_msgs/String JSON, 출력 제한 변경)
         /rc/hw_request  (std_msgs/String JSON, trailer_zero / fault_reset)
-  출력  /joint_states        sensor_msgs/JointState  (뒷바퀴 2개 위치[rad]/속도[rad/s], trailer_joint)
+  출력  /joint_states        sensor_msgs/JointState  (trailer_joint, 엔코더 사용 시 뒷바퀴 위치/속도)
         /steering/angle_cmd  std_msgs/Float64        (서보 명령 조향각 rad — 측정값 아님)
         /trailer/angle       std_msgs/Float64        (MT6701 트레일러 상대각 rad, ppr 설정 시에만)
         /ultrasonic/<name>   sensor_msgs/Range       (실패 시 range = NaN)
@@ -81,9 +81,9 @@ class VehicleNode(Node):
         c = self.cfg
         m = c['motors']
         self.cpr = m['encoder_ppr'] * m['quadrature_multiplier'] * m['gear_ratio']
-        # 사람이 엔코더 동작을 확인(README §6-3·6-4)하기 전에는 엔코더 값을 피드백으로 쓰지 않는다.
-        # (신호가 없어 카운트가 0 으로 고정돼도 '정지 중'과 구분할 수 없기 때문)
-        self.enc_verified = bool(m.get('encoders_verified', False))
+        # DC 모터 엔코더 사용 여부. false → 엔코더 GPIO 미설정, PI 불가(Open-loop 만), 속도/거리 미보고.
+        # (구 설정 키 encoders_verified 도 인식)
+        self.use_enc = bool(m.get('use_encoders', m.get('encoders_verified', False)))
         self.wheel_d = c['vehicle']['wheel_diameter_m']
         self.motors = [Motor(m['left'], self.cpr), Motor(m['right'], self.cpr)]
         sc = c['speed_control']
@@ -200,9 +200,10 @@ class VehicleNode(Node):
                     pi.set_pwm_frequency(g, m['pwm_frequency_hz'])
                     pi.set_pwm_range(g, m['pwm_range'])
                 mo.applied = (None, None)
-                for key in ('enc_a', 'enc_b'):
-                    pi.set_mode(mo.cfg[key], Pigpio.INPUT)
-                    pi.set_pull(mo.cfg[key], m.get('encoder_pull', 'up'))
+                if self.use_enc:
+                    for key in ('enc_a', 'enc_b'):
+                        pi.set_mode(mo.cfg[key], Pigpio.INPUT)
+                        pi.set_pull(mo.cfg[key], m.get('encoder_pull', 'up'))
             for key in ('enc_a', 'enc_b', 'enc_z'):
                 pi.set_mode(self.tr[key], Pigpio.INPUT)
                 pi.set_pull(self.tr[key], self.tr.get('pull', 'off'))
@@ -232,9 +233,9 @@ class VehicleNode(Node):
                     self.get_logger().error('pigpio 워치독 스크립트 실행 실패 → 모터 비활성화 '
                                             '(config pigpio.watchdog_script: false 로 끌 수 있음)')
 
-            # 알림 스트림: 엔코더 + MT6701 + 초음파 에코
+            # 알림 스트림: (엔코더) + MT6701 + 초음파 에코
             bits = 0
-            for mo in self.motors:
+            for mo in self.motors if self.use_enc else ():
                 bits |= mo.enc.mask
             bits |= self.trailer_enc.mask | (1 << self.tr['enc_z'])
             for g in self.echo_pins:
@@ -279,7 +280,7 @@ class VehicleNode(Node):
 
     # ================================================================ 엣지 처리 스레드
     def _notify_loop(self, stream):
-        enc = [mo.enc for mo in self.motors] + [self.trailer_enc]
+        enc = ([mo.enc for mo in self.motors] if self.use_enc else []) + [self.trailer_enc]
         zbit = 1 << self.tr['enc_z']
         echo_bits = {g: 1 << g for g in self.echo_pins}
         last_rate_t, last_rate_n = time.monotonic(), 0
@@ -402,9 +403,11 @@ class VehicleNode(Node):
 
         sc = self.cfg['speed_control']
         self.warnings = []
-        if not self.enc_verified:
-            self.warnings.append('ENCODERS_UNVERIFIED: PI 속도제어·속도/odom·자동주차 차단 (Open-loop 수동 조종만 가능)')
-        # --- 엔코더 스냅샷 & RPM ---
+        # --- 엔코더 스냅샷 & RPM (엔코더 사용 시에만) ---
+        snap = self._update_encoders(t, sc) if self.use_enc else None
+        self._control(t, dt, sc, snap)
+
+    def _update_encoders(self, t, sc):
         with self.lock:
             snap = [(mo.enc.count, mo.enc.last_tick, mo.enc.errors) for mo in self.motors]
         win = sc['velocity_window_s']
@@ -435,7 +438,9 @@ class VehicleNode(Node):
                 mo.last_move_t = t
             mo.last_count = cnt
         self.odometer += abs(sum(dist_step) / 2.0)
+        return snap
 
+    def _control(self, t, dt, sc, snap):
         # --- 명령 해석 ---
         cmd = self.cmd
         age = t - self.cmd_rx if cmd else None
@@ -453,8 +458,8 @@ class VehicleNode(Node):
             mode, reason = 'stop', 'MOTORS_DISABLED'
         if mode == 'velocity' and self.latched_faults:
             mode, reason = 'stop', 'FAULT_LATCHED'
-        if mode == 'velocity' and not self.enc_verified:
-            mode, reason = 'stop', 'ENCODERS_UNVERIFIED'
+        if mode == 'velocity' and not self.use_enc:
+            mode, reason = 'stop', 'NO_ENCODERS'     # 속도 측정 수단 없음 → PI 불가
 
         # --- 조향 ---
         if cmd and reason not in ('NO_COMMAND', 'COMMAND_TIMEOUT'):
@@ -514,8 +519,8 @@ class VehicleNode(Node):
             for mo in self.motors:                   # 정지는 즉시 (변화율 제한 없음)
                 mo.duty, mo.integ, mo.target_rpm = 0.0, 0.0, 0.0
 
-        # --- 엔코더 이상 감지 ---
-        for i, mo in enumerate(self.motors):
+        # --- 엔코더 이상 감지 (엔코더 사용 시에만) ---
+        for i, mo in enumerate(self.motors if self.use_enc else ()):
             if abs(mo.duty) >= sc['stall_pwm_threshold'] and t - mo.last_move_t > sc['stall_time_s']:
                 code = f'ENCODER_OR_STALL_{mo.name}'
                 if mode == 'velocity':
@@ -582,7 +587,7 @@ class VehicleNode(Node):
     def _publish_fast(self, snap):
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
-        for mo, (cnt, _lt, _e) in zip(self.motors, snap):
+        for mo, (cnt, _lt, _e) in zip(self.motors, snap or ()):   # 엔코더 미사용 시 바퀴 값 미발행
             js.name.append(mo.name)
             js.position.append(cnt / self.cpr * 2 * math.pi)
             js.velocity.append(mo.measured_rpm * 2 * math.pi / 60.0)
@@ -604,17 +609,19 @@ class VehicleNode(Node):
         connected = self.pi is not None and self.notify_alive
         sc = self.cfg['speed_control']
         motors = []
+        enc = self.use_enc
         for mo in self.motors:
             motors.append({
                 'name': mo.name,
-                'target_rpm': round(mo.target_rpm, 1),
-                'measured_rpm': round(mo.measured_rpm, 1) if connected else None,
+                'target_rpm': round(mo.target_rpm, 1) if enc else None,
+                'measured_rpm': round(mo.measured_rpm, 1) if connected and enc else None,
                 'pwm': round(mo.duty, 3),
-                'count': mo.enc.count,
-                'revolutions': round(mo.enc.count / self.cpr, 3),
-                'direction': 'FWD' if mo.measured_rpm > 1 else 'REV' if mo.measured_rpm < -1 else 'STOP',
-                'distance_m': round(mo.net_m, 3),
-                'enc_errors': mo.enc.errors,
+                'count': mo.enc.count if enc else None,
+                'revolutions': round(mo.enc.count / self.cpr, 3) if enc else None,
+                'direction': (('FWD' if mo.measured_rpm > 1 else 'REV' if mo.measured_rpm < -1 else 'STOP')
+                              if enc else None),
+                'distance_m': round(mo.net_m, 3) if enc else None,
+                'enc_errors': mo.enc.errors if enc else None,
             })
         speeds = [mo.measured_rpm / 60.0 * math.pi * self.wheel_d for mo in self.motors]
         ta = self._trailer_angle()
@@ -630,8 +637,6 @@ class VehicleNode(Node):
             cal.append('lidar_tf')
         if not self.trailer_cpr:
             cal.append('trailer.ppr')
-        if not self.enc_verified:
-            cal.append('motors.encoders_verified')
         if not self.us_cfg.get('mount_measured'):
             cal.append('ultrasonic_mount')
         faults = list(self.latched_faults)
@@ -656,13 +661,13 @@ class VehicleNode(Node):
             'stop_reason': self.stop_reason if connected else 'PIGPIO_DISCONNECTED',
             'cmd_age_s': finite_or_none(self.cmd_age, 3),
             'motors': motors,
-            # 검증 전에는 속도를 측정값으로 내보내지 않음 (raw RPM/count 는 위 motors 에 그대로 표시)
-            'speed_m_s': round(sum(speeds) / 2, 3) if connected and self.enc_verified else None,
-            'encoders_verified': self.enc_verified,
-            'odometer_m': round(self.odometer, 3),
-            'net_distance_m': round(sum(mo.net_m for mo in self.motors) / 2, 3),
-            # 엔코더 데이터 신뢰 가능 여부: 스트림 정상 + 엔코더 관련 고장 없음
-            'encoders_ok': connected and self.enc_verified and
+            # 엔코더 미사용 시 차량 속도는 여기서 내보내지 않음 (라이다 odom: /odom, /rc/odom_status)
+            'speed_m_s': round(sum(speeds) / 2, 3) if connected and enc else None,
+            'encoders_used': enc,
+            'odometer_m': round(self.odometer, 3) if enc else None,
+            'net_distance_m': round(sum(mo.net_m for mo in self.motors) / 2, 3) if enc else None,
+            # 엔코더 데이터 신뢰 가능 여부: 사용 중 + 스트림 정상 + 엔코더 관련 고장 없음
+            'encoders_ok': connected and enc and
             not any(f.startswith(('ENCODER', 'DIRECTION')) for f in faults),
             'faults': faults,
             'warnings': self.warnings,

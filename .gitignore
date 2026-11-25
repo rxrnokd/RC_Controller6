@@ -26,6 +26,8 @@ venv/
 # ---- ROS 2 colcon 빌드 산출물 ----
 rc_lidar_docker/ros2_ws/build/
 rc_lidar_docker/ros2_ws/install/
+rc_lidar_docker/ros2_ws/build_rc/
+rc_lidar_docker/ros2_ws/install_rc/
 rc_lidar_docker/ros2_ws/log/
 
 # ---- 차량별 실행 데이터 (저장 지도, 트레일러 영점, 자동주차 출력) ----
