@@ -51,7 +51,7 @@
 | 컨테이너 안에서 pigpiod 실행 | `--privileged` + `/dev/mem` 필요, 컨테이너 재시작 시 DMA 정리 문제 |
 | **호스트에서 pigpiod, 컨테이너는 소켓으로 접속 (채택)** | DMA 기반 PWM(모든 핀), 서보 펄스, 5µs 샘플링 엣지 타임스탬프. 컨테이너는 privileged 불필요. pigpiod 는 `-l`(localhost 전용) |
 
-즉 **"하드웨어 타이밍이 중요한 부분만 Raspberry Pi OS(pigpiod)에서 실행"** 하고, 제어 로직·ROS·SLAM·웹은 모두 Docker 안에 있습니다. pigpiod 프로토콜·WebSocket 은 표준 라이브러리로 구현했고, 라이다 odom 만 **numpy(필수)·scipy(권장)** 를 씁니다 (§4-7).
+즉 **"하드웨어 타이밍이 중요한 부분만 Raspberry Pi OS(pigpiod)에서 실행"** 하고, 제어 로직·ROS·SLAM·웹은 모두 Docker 안에 있습니다. pigpiod 프로토콜·WebSocket 은 표준 라이브러리로 구현했고, 라이다 odom 만 **numpy(필수)·scipy(권장)** 를 씁니다 (INSTALL.md 1-11).
 
 ### 엔코더 없이 위치를 구하는 방법
 SLAM Toolbox 는 `odom → base_link` TF 가 있어야 스캔을 처리합니다. 엔코더 대신 `odometry_node` 가 **연속된 라이다 스캔을 서로 맞춰(Point-to-Line ICP)** 차량 이동량을 구하고 이 TF 를 발행합니다. SLAM Toolbox 는 그 위에서 지도를 만들고 `map → odom` 보정을 합니다 (SLAM Toolbox 자체는 수정하지 않음).
@@ -139,65 +139,9 @@ rc_lidar_docker/
 
 ---
 
-## 4. 설치 (최초 1회)
+## 4. 설치 · 실행
 
-### 4-1. [Windows] 파일을 Pi로 복사
-```powershell
-cd "$HOME\OneDrive\바탕 화면\RC_Controller6"
-scp -r .\rc_lidar_docker\* pi@<Pi-IP>:~/rc_lidar_docker/
-scp .\rc_lidar_docker\.env.example pi@<Pi-IP>:~/rc_lidar_docker/
-```
-기존 `Dockerfile`, `config/slam.yaml`, `maps/`, `sllidar_ros2` 는 덮어쓰지 않습니다(같은 이름 파일이 없음).
-
-### 4-2. [Pi] 줄바꿈·권한 정리, pigpiod 설치
-```bash
-cd ~/rc_lidar_docker
-sed -i 's/\r$//' rc.sh host/setup_host.sh scripts/run_in_container.sh   # Windows CRLF 대비
-chmod +x rc.sh host/setup_host.sh scripts/run_in_container.sh
-sudo bash host/setup_host.sh        # apt 에 pigpio 가 없으면 소스 빌드 방법을 출력함
-```
-
-### 4-3. [Pi] 부팅 설정 (GPIO 충돌 제거) 후 재부팅
-```bash
-sudo raspi-config        # Interface Options → Serial Port: 로그인 셸 No / 하드웨어 No,  SPI: No,  1-Wire: No
-sudo reboot
-./rc.sh check            # 모든 항목 OK 확인
-```
-
-### 4-4. [Pi] 기존 Docker 이미지 지정
-```bash
-docker images                       # 기존 ROS 2 Jazzy + SLAM Toolbox 이미지 이름 확인
-cp .env.example .env
-nano .env                           # RC_IMAGE=<기존 이미지 이름:태그>
-```
-`RC_IMAGE` 이미지가 없으면 `docker compose` 가 기존 `Dockerfile` 로 빌드합니다(새 패키지 설치 없음).
-
-### 4-5. [Pi] 배터리 전압 설정 (필수)
-```bash
-nano config/vehicle.yaml            # power.battery_voltage_max: 12.6  (예: 3S LiPo 만충)
-```
-
-### 4-6. [Pi] 실행
-```bash
-./rc.sh up          # 최초에는 컨테이너 안에서 colcon build (sllidar_ros2 + rc_car, 수 분 소요)
-./rc.sh logs        # "웹 UI: http://..." 로그 확인
-```
-노트북 브라우저에서 **`http://<Pi-IP>:8080`** 접속.
-
-### 4-7. [Docker] 라이다 odom 의존성 확인 (numpy 필수, scipy 권장)
-```bash
-./rc.sh shell
-python3 -c "import numpy, scipy; print('numpy', numpy.__version__, 'scipy', scipy.__version__)"
-```
-- 둘 다 나오면 끝. `./rc.sh logs` 에 `[rc] 경고: python3-numpy 없음` / `알림: python3-scipy 없음` 이 보이면 설치가 필요합니다.
-- numpy 가 없으면 라이다 odom 이 꺼져 **SLAM 위치가 생기지 않습니다.** scipy 가 없으면 동작은 하지만 스캔 1개 처리 시간이 길어집니다(웹 UI '라이다 odom' 줄의 ms 값).
-- 설치는 **이미지에** 넣어야 컨테이너를 다시 만들어도 유지됩니다. 기존 Dockerfile 이 있으면 `apt-get install -y python3-numpy python3-scipy` 줄을 추가해 다시 빌드하는 것이 가장 깔끔합니다. Dockerfile 을 쓰지 않는다면:
-```bash
-# [Pi]
-docker exec -it rc_car bash -c "apt-get update && apt-get install -y python3-numpy python3-scipy"
-docker commit rc_car rc_lidar_docker:latest     # .env 의 RC_IMAGE 와 같은 이름으로
-./rc.sh restart
-```
+**설치와 실행 절차는 저장소 최상위의 [`INSTALL.md`](../INSTALL.md) 에 있습니다** (GitHub 에서 받아 Pi 의 `~/rc_lidar_docker` 에 덧붙여 복사하는 방식, pigpiod 설치, 부팅 설정, Docker 이미지 지정, 배터리 전압, numpy·scipy 확인, 업데이트 방법).
 
 ---
 
@@ -343,11 +287,11 @@ base_link 원점 = **뒷차축 중심(지면)**, +x 전방, +y 좌측, 조향각
 | `MOTORS_DISABLED` | `battery_voltage_max` 미설정/범위 밖 |
 | (엔코더 사용 시) count 안 변함 / `enc_errors` 증가 / `DIRECTION_MISMATCH_*` | 엔코더 전원 3.3 V·GND 공통·UART/1-Wire 충돌 / 노이즈·배선 / `invert_output`·`invert_encoder` |
 | 라이다 odom `NO_SCAN` | `/scan` 이 안 들어옴 → 아래 `/scan` 없음 항목 |
-| 라이다 odom `NO_NUMPY` | 컨테이너에 numpy 없음 → §4-7 |
+| 라이다 odom `NO_NUMPY` | 컨테이너에 numpy 없음 → INSTALL.md 1-11 |
 | 라이다 odom `LOST` (`TOO_FEW_MATCHES`, `LOW_OVERLAP`, `HIGH_RESIDUAL`, `JUMP`) | 너무 빠름(특히 회전) → 천천히. 주변에 보이는 물체가 적음. 차체·트레일러 점이 섞임(§6-13). `lidar.yaw` 등 장착값 오류 |
 | 라이다 odom `DEGENERATE` | 긴 복도처럼 한 방향 벽만 보임 → 진행 방향 이동량을 못 잼. 옆에 물체를 두거나 다른 경로로 |
 | '재설정' 횟수 증가 | 연속 실패 후 키프레임을 다시 잡음 → odom 위치가 튀었을 수 있음. SLAM 이 지도와 맞춰 보정하지만, 크게 튀면 지도가 깨질 수 있으니 천천히 다시 주행 |
-| 라이다 odom 처리 시간(ms)이 100 에 가까움 | scipy 설치(§4-7), `odometry.max_points` 줄이기·`voxel_m` 키우기 |
+| 라이다 odom 처리 시간(ms)이 100 에 가까움 | scipy 설치(INSTALL.md 1-11), `odometry.max_points` 줄이기·`voxel_m` 키우기 |
 | 초음파 `TIMEOUT` | US-100 점퍼 제거(Trig/Echo 모드), Echo 전압, 핀 |
 | MT6701 값 이상 | SPI 꺼짐 확인(GPIO9/10), 전원 3.3 V, ABZ 출력 모드 |
 | `/scan` 없음 | [Pi] `ls /dev/ttyUSB*`, `vehicle.yaml` `lidar.serial_port`. sllidar 런치 인자명이 다르면 `bringup.launch.py` 의 `serial_port/frame_id` 수정 |

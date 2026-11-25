@@ -11,8 +11,8 @@ if [ ! -f install_rc/setup.bash ] || [ ! -d install_rc/rc_car ] || [ "${RC_REBUI
     --packages-select sllidar_ros2 rc_car
 fi
 source install_rc/setup.bash
-# 라이다 스캔매칭 odom 은 numpy 필수, scipy 권장 (없으면 느림). 없으면 README §4-7 참고.
-python3 -c "import numpy" 2>/dev/null || echo "[rc] 경고: python3-numpy 없음 → 라이다 odom/SLAM 위치 비활성 (README §4-7)"
-python3 -c "import scipy" 2>/dev/null || echo "[rc] 알림: python3-scipy 없음 → 라이다 odom 이 느릴 수 있음 (README §4-7)"
+# 라이다 스캔매칭 odom 은 numpy 필수, scipy 권장 (없으면 느림). 없으면 INSTALL.md 1-11 참고.
+python3 -c "import numpy" 2>/dev/null || echo "[rc] 경고: python3-numpy 없음 → 라이다 odom/SLAM 위치 비활성 (INSTALL.md 1-11)"
+python3 -c "import scipy" 2>/dev/null || echo "[rc] 알림: python3-scipy 없음 → 라이다 odom 이 느릴 수 있음 (INSTALL.md 1-11)"
 echo "[rc] ros2 launch rc_car bringup.launch.py ${RC_LAUNCH_ARGS}"
 exec ros2 launch rc_car bringup.launch.py ${RC_LAUNCH_ARGS}
